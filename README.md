@@ -1,7 +1,7 @@
 # Deez VRM Viewer
 
 <p align="center">
-  <img src="https://cdn.jsdelivr.net/gh/DeaconDP/Deez-VRM-Viewer@PLACEHOLDER/docs/screenshots/hero.png" alt="Deez VRM Viewer" width="720" />
+  <img src="https://cdn.jsdelivr.net/gh/DeaconDP/Deez-VRM-Viewer@08d309259e0c1a25f16a286afb2094e2f915518f/docs/screenshots/hero.png" alt="Deez VRM Viewer" width="720" />
 </p>
 
 Private, local-first VRM 0.x / 1.0 viewer — models never leave your device.
