@@ -575,7 +575,7 @@ function App() {
     }
   };
 
-  useEffect(() => { const keys = (e: KeyboardEvent) => { if ((e.target as HTMLElement).matches('input,textarea')) return; if (e.key.toLowerCase() === 'g') setGrid(controller.current?.toggleGrid() ?? false); if (e.key.toLowerCase() === 'b' && !e.ctrlKey && !e.metaKey && !e.altKey) toggleSprings.current(); if (e.key === 'Home' || e.key.toLowerCase() === 'f') controller.current?.frameAll(); if (e.key === 'Escape') { setUrlOpen(false); setCaptureOpen(false); setSelected(null); } }; addEventListener('keydown', keys); return () => removeEventListener('keydown', keys); }, []);
+  useEffect(() => { const keys = (e: KeyboardEvent) => { if (e.repeat || (e.target as HTMLElement).matches('input,textarea,select,[contenteditable]')) return; if (e.key.toLowerCase() === 'g') setGrid(controller.current?.toggleGrid() ?? false); if (e.key.toLowerCase() === 'b' && !e.ctrlKey && !e.metaKey && !e.altKey) toggleSprings.current(); if (e.key === 'Home' || e.key.toLowerCase() === 'f') controller.current?.frameAll(); if (e.key === 'Escape') { setUrlOpen(false); setCaptureOpen(false); setSelected(null); } }; addEventListener('keydown', keys); return () => removeEventListener('keydown', keys); }, []);
 
   return <main class={`app ${!leftOpen ? 'left-closed' : ''} ${!rightOpen ? 'right-closed' : ''}`} onDragOver={e => e.preventDefault()} onDrop={onDrop}>
     <header class="toolbar">
