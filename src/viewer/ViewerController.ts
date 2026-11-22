@@ -12,6 +12,7 @@ import { describeMaterialInfo, listTextureSlots } from './materialInfo';
 import { textureThumbnail } from './textureThumbnail';
 import { SpringBoneOverlay, countSpringBones } from './springBoneOverlay';
 import { retargetQuaterniusClip, type QuaterniusAnimationId, type QuaterniusLibraryId } from './quaterniusAnimations';
+import { FRAMING_BONES, frameCameraPreset, type CameraPreset, type FramingBone } from './cameraPresets';
 
 export type BuiltInAnimationId = QuaterniusAnimationId;
 
@@ -280,6 +281,22 @@ export class ViewerController {
     const vectors = { front: [0, 0, distance], back: [0, 0, -distance], left: [-distance, 0, 0], right: [distance, 0, 0] } as const;
     this.camera.position.set(target.x + vectors[view][0], target.y, target.z + vectors[view][2]); this.controls.update(); this.render();
   }
+  /**
+   * Frames the model for a preset from in front of it (VRM and glTF face +Z, the same side as setView('front')),
+   * following the current turntable rotation. Uses humanoid bones for VRM, the bounding box otherwise. Returns false without a model.
+   */
+  setCameraPreset(preset: CameraPreset) {
+    if (!this.model) return false;
+    this.model.updateWorldMatrix(true, true);
+    const facing = new THREE.Vector3(0, 0, 1).applyQuaternion(this.model.getWorldQuaternion(new THREE.Quaternion()));
+    const bones: Partial<Record<FramingBone, THREE.Vector3>> = {};
+    if (this.vrm) for (const name of FRAMING_BONES) { const node = this.vrm.humanoid.getNormalizedBoneNode(name); if (node) bones[name] = node.getWorldPosition(new THREE.Vector3()); }
+    const framing = frameCameraPreset(preset, { bounds: new THREE.Box3().setFromObject(this.model), facing, bones: this.vrm ? bones : undefined }, this.camera.fov, this.camera.aspect);
+    if (!framing) return false;
+    this.controls.target.copy(framing.target); this.camera.position.copy(framing.position); this.controls.update(); this.render();
+    return true;
+  }
+  setGridVisible(visible: boolean) { this.grid.visible = visible; this.render(); return visible; }
   toggleGrid() { this.grid.visible = !this.grid.visible; this.render(); return this.grid.visible; }
   toggleTurntable() { this.turntable = !this.turntable; this.turntable ? this.startLoop() : this.stopLoop(); return this.turntable; }
 

@@ -13,17 +13,20 @@ import { installDesktopBridge } from './platform/desktopBridge';
 import { saveLocalFile } from './platform/exportFile';
 import { QUATERNIUS_LIBRARIES } from './viewer/quaterniusAnimations';
 import { virtualWindow } from './ui/virtualWindow';
+import { clearSceneSettings, DEFAULT_SCENE, loadSceneSettings, saveSceneSettings, type SceneSettings } from './ui/sceneSettingsStore';
 import termsUrl from '../TERMS.md?url';
 import privacyUrl from '../PRIVACY.md?url';
 import licenseUrl from '../LICENSE?url';
 import noticesUrl from '../THIRD_PARTY_NOTICES.md?url';
 import './styles.css';
 import './inspector.css';
+import './scenePanel.css';
 
 installDesktopBridge();
 
 type Controller = import('./viewer/ViewerController').ViewerController;
 type BuiltInAnimationId = import('./viewer/ViewerController').BuiltInAnimationId;
+type CameraPreset = import('./viewer/cameraPresets').CameraPreset;
 type LegalView = 'about' | 'terms' | 'privacy' | 'licences';
 
 const LEGAL_VERSION = '2026-07-05-v2';
@@ -46,8 +49,11 @@ const EMPTY_ANIMATION: AnimationState = { name: '', source: null, duration: 0, t
 type BakeStatus = 'idle' | 'reading' | 'working' | 'complete' | 'error';
 interface BakeUiState { status: BakeStatus; stage: BakeStage; progress: number; detail: string; error: string; stats?: BakeStats }
 const EMPTY_BAKE: BakeUiState = { status: 'idle', stage: 'preflight', progress: 0, detail: '', error: '' };
-interface SceneSettings { key: number; fill: number; rim: number; exposure: number; backgroundMode: 'color' | 'image'; backgroundColor: string; backgroundName: string }
-const DEFAULT_SCENE: SceneSettings = { key: 3.4, fill: 2.2, rim: 2.4, exposure: 1.05, backgroundMode: 'color', backgroundColor: '#70777d', backgroundName: '' };
+const CAMERA_PRESET_BUTTONS: { id: CameraPreset; label: string; hint: string; key: string }[] = [
+  { id: 'full', label: 'Full body', hint: 'Whole avatar from the front', key: '1' },
+  { id: 'portrait', label: 'Portrait', hint: 'Head and shoulders', key: '2' },
+  { id: 'thumbnail', label: 'Thumbnail', hint: 'VRChat-style 4:3 upper body', key: '3' }
+];
 
 const EXPLORER_GROUPS = ['Nodes', 'Meshes', 'Humanoid', 'Expressions', 'Materials'] as const;
 const DEFAULT_OPEN_GROUPS: Record<string, boolean> = { Meshes: true, Expressions: true };
@@ -200,11 +206,15 @@ function Inspector({ model, selected, materialDetails, expressionValues, onExpre
   </div>;
 }
 
-function ScenePanel({ settings, error, onChange, onFile, onUrl, onReset }: { settings: SceneSettings; error: string; onChange: (patch: Partial<SceneSettings>) => void; onFile: () => void; onUrl: (url: string) => void; onReset: () => void }) {
+function ScenePanel({ settings, error, hasModel, cameraPreset, onChange, onFile, onUrl, onReset, onCameraPreset }: { settings: SceneSettings; error: string; hasModel: boolean; cameraPreset: CameraPreset | ''; onChange: (patch: Partial<SceneSettings>) => void; onFile: () => void; onUrl: (url: string) => void; onReset: () => void; onCameraPreset: (preset: CameraPreset) => void }) {
   const [url, setUrl] = useState('');
   const slider = (label: string, key: 'key' | 'fill' | 'rim', hint: string) => <label class="scene-slider"><span><b>{label}</b><small>{hint}</small></span><output>{settings[key].toFixed(1)}</output><input type="range" min="0" max="8" step="0.1" value={settings[key]} onInput={e => onChange({ [key]: Number(e.currentTarget.value) })} /></label>;
   return <div class="panel-content scene-panel">
     <div class="panel-heading"><div><span class="eyebrow">LOOK DEV</span><h2>Scene</h2></div><Sun /></div>
+    <Accordion title="Camera" open>
+      <div class="preset-list camera-presets">{CAMERA_PRESET_BUTTONS.map(preset => <button class={cameraPreset === preset.id ? 'selected' : ''} disabled={!hasModel} data-camera-preset={preset.id} aria-pressed={cameraPreset === preset.id} title={`${preset.label} (${preset.key})`} onClick={() => onCameraPreset(preset.id)} key={preset.id}><span><b>{preset.label}</b><small>{preset.hint}</small></span><kbd>{preset.key}</kbd></button>)}</div>
+      {!hasModel && <p class="process-note"><Camera /> Open a model to use camera presets.</p>}
+    </Accordion>
     <Accordion title="Studio lighting" open>
       {slider('Key light', 'key', 'Main light from the front-right')}
       {slider('Fill light', 'fill', 'Softens shadows from above')}
@@ -219,7 +229,7 @@ function ScenePanel({ settings, error, onChange, onFile, onUrl, onReset }: { set
       {error && <p class="inline-error">{error}</p>}
       <p class="process-note"><Eye /> Local images stay on this device. Remote servers must allow CORS.</p>
     </Accordion>
-    <div class="scene-reset"><button class="secondary wide" onClick={onReset}><Undo2 /> Reset scene</button></div>
+    <div class="scene-reset"><button class="secondary wide" onClick={onReset}><Undo2 /> Reset scene</button><p class="process-note"><Eye /> Lighting, background colour and grid are saved on this device only. Background images are not kept.</p></div>
   </div>;
 }
 
@@ -334,10 +344,23 @@ function App() {
   const [state, setState] = useState<LoadState>('idle'), [progress, setProgress] = useState(0), [error, setError] = useState('');
   const [model, setModel] = useState<ModelSummary | null>(null), [fileName, setFileName] = useState('No model open');
   const [leftOpen, setLeftOpen] = useState(true), [rightOpen, setRightOpen] = useState(true), [filter, setFilter] = useState('');
-  const [selected, setSelected] = useState<TreeItem | null>(null), [grid, setGrid] = useState(false), [turntable, setTurntable] = useState(false);
+  const [selected, setSelected] = useState<TreeItem | null>(null), [turntable, setTurntable] = useState(false);
   const [expressionValues, setExpressionValues] = useState<Record<string, number>>({}), [urlOpen, setUrlOpen] = useState(false), [captureOpen, setCaptureOpen] = useState(false);
   const [rightTab, setRightTab] = useState<'inspector' | 'scene' | 'animation' | 'bake'>('inspector'), [animation, setAnimation] = useState<AnimationState>(EMPTY_ANIMATION);
-  const [sceneSettings, setSceneSettings] = useState<SceneSettings>(DEFAULT_SCENE), [sceneError, setSceneError] = useState('');
+  const [sceneSettings, setSceneSettings] = useState<SceneSettings>(() => loadSceneSettings()), [sceneError, setSceneError] = useState('');
+  const [grid, setGridState] = useState(sceneSettings.grid), [cameraPreset, setCameraPreset] = useState<CameraPreset | ''>('');
+  // Only user changes are saved: loading or resetting the scene must not write the store back.
+  const sceneDirty = useRef(false), sceneSaveTimer = useRef(0);
+  const setGrid = (visible: boolean) => { sceneDirty.current = true; setGridState(visible); };
+  useEffect(() => {
+    if (!sceneDirty.current) return;
+    clearTimeout(sceneSaveTimer.current);
+    sceneSaveTimer.current = window.setTimeout(() => saveSceneSettings({ ...sceneSettings, grid }), 250);
+  }, [sceneSettings, grid]);
+  useEffect(() => () => clearTimeout(sceneSaveTimer.current), []);
+  useEffect(() => setCameraPreset(''), [model]);
+  const applyCameraPreset = useRef((_preset: CameraPreset) => {});
+  applyCameraPreset.current = preset => { if (controller.current?.setCameraPreset(preset)) setCameraPreset(preset); };
   const [sourceFile, setSourceFile] = useState<File | null>(null), [bake, setBake] = useState<BakeUiState>(EMPTY_BAKE);
   const [mergeMeshes, setMergeMeshes] = useState(true);
   const [animationSpeed, setAnimationSpeed] = useState(1), [animationLoop, setAnimationLoop] = useState<AnimationLoopMode>('repeat'), [inPlace, setInPlace] = useState(true);
@@ -359,7 +382,7 @@ function App() {
 
   useEffect(() => {
     let live = true;
-    import('./viewer/ViewerController').then(({ ViewerController }) => { if (live && canvasRef.current) { controller.current = new ViewerController(canvasRef.current); controller.current.setAnimationListener(setAnimation); controller.current.setFpsListener(setFps); controller.current.setLighting(sceneSettings.key, sceneSettings.fill, sceneSettings.rim, sceneSettings.exposure); controller.current.setBackgroundColor(sceneSettings.backgroundColor); setViewerReady(true); } });
+    import('./viewer/ViewerController').then(({ ViewerController }) => { if (live && canvasRef.current) { controller.current = new ViewerController(canvasRef.current); controller.current.setAnimationListener(setAnimation); controller.current.setFpsListener(setFps); controller.current.setLighting(sceneSettings.key, sceneSettings.fill, sceneSettings.rim, sceneSettings.exposure); controller.current.setBackgroundColor(sceneSettings.backgroundColor); controller.current.setGridVisible(grid); setViewerReady(true); } });
     return () => { live = false; bakeWorker.current?.terminate(); controller.current?.dispose(); if (objectUrl.current) URL.revokeObjectURL(objectUrl.current); if (animationUrl.current) URL.revokeObjectURL(animationUrl.current); if (backgroundUrl.current) URL.revokeObjectURL(backgroundUrl.current); };
   }, []);
 
@@ -474,7 +497,7 @@ function App() {
   const changeLoop = (value: AnimationLoopMode) => { setAnimationLoop(value); controller.current?.setAnimationLoop(value); };
   const changeInPlace = (value: boolean) => { setInPlace(value); controller.current?.setAnimationInPlace(value); };
   const changeScene = (patch: Partial<SceneSettings>) => {
-    setSceneError('');
+    setSceneError(''); sceneDirty.current = true;
     setSceneSettings(old => {
       const next = { ...old, ...patch };
       controller.current?.setLighting(next.key, next.fill, next.rim, next.exposure);
@@ -484,7 +507,7 @@ function App() {
   };
   const applyBackgroundImage = async (url: string, name: string) => {
     setSceneError('');
-    try { await controller.current?.setBackgroundImage(url); setSceneSettings(old => ({ ...old, backgroundMode: 'image', backgroundName: name })); }
+    try { await controller.current?.setBackgroundImage(url); sceneDirty.current = true; setSceneSettings(old => ({ ...old, backgroundMode: 'image', backgroundName: name })); }
     catch { setSceneError('The image could not be loaded. Check the address, file type, and CORS permissions.'); }
   };
   const openBackground = (file: File) => {
@@ -496,7 +519,7 @@ function App() {
     try { const parsed = new URL(value); if (!['https:', 'http:'].includes(parsed.protocol)) throw new Error(); void applyBackgroundImage(parsed.href, parsed.hostname); }
     catch { setSceneError('Enter a valid HTTP or HTTPS image URL.'); }
   };
-  const resetScene = () => { setSceneSettings(DEFAULT_SCENE); setSceneError(''); controller.current?.setLighting(DEFAULT_SCENE.key, DEFAULT_SCENE.fill, DEFAULT_SCENE.rim, DEFAULT_SCENE.exposure); controller.current?.setBackgroundColor(DEFAULT_SCENE.backgroundColor); };
+  const resetScene = () => { sceneDirty.current = false; clearTimeout(sceneSaveTimer.current); clearSceneSettings(); setSceneSettings(DEFAULT_SCENE); setGridState(controller.current?.setGridVisible(DEFAULT_SCENE.grid) ?? DEFAULT_SCENE.grid); setSceneError(''); controller.current?.setLighting(DEFAULT_SCENE.key, DEFAULT_SCENE.fill, DEFAULT_SCENE.rim, DEFAULT_SCENE.exposure); controller.current?.setBackgroundColor(DEFAULT_SCENE.backgroundColor); };
   const submitUrl = (event: SubmitEvent) => { event.preventDefault(); const input = new FormData(event.currentTarget as HTMLFormElement).get('url')?.toString() ?? ''; try { const parsed = new URL(input); if (parsed.protocol !== 'https:' && parsed.hostname !== 'localhost') throw new Error(); cancelBake(false); setSourceFile(null); const name = parsed.pathname.split('/').pop() || 'Remote model'; reloadSource.current = { kind: 'url', url: parsed.href, name }; void loadUrl(parsed.href, name); setUrlOpen(false); } catch { setError('Enter a valid HTTPS model URL.'); setState('error'); } };
   const acceptLegal = () => { try { localStorage.setItem(LEGAL_ACCEPTANCE_KEY, LEGAL_VERSION); } catch { /* Acceptance remains valid for this session. */ } setLegalAccepted(true); };
   const showLegal = (view: LegalView) => { setLegalView(view); setLegalOpen(true); };
@@ -575,7 +598,7 @@ function App() {
     }
   };
 
-  useEffect(() => { const keys = (e: KeyboardEvent) => { if (e.repeat || (e.target as HTMLElement).matches('input,textarea,select,[contenteditable]')) return; if (e.key.toLowerCase() === 'g') setGrid(controller.current?.toggleGrid() ?? false); if (e.key.toLowerCase() === 'b' && !e.ctrlKey && !e.metaKey && !e.altKey) toggleSprings.current(); if (e.key === 'Home' || e.key.toLowerCase() === 'f') controller.current?.frameAll(); if (e.key === 'Escape') { setUrlOpen(false); setCaptureOpen(false); setSelected(null); } }; addEventListener('keydown', keys); return () => removeEventListener('keydown', keys); }, []);
+  useEffect(() => { const keys = (e: KeyboardEvent) => { if (e.repeat || (e.target as HTMLElement).matches('input,textarea,select,[contenteditable]')) return; if (e.key.toLowerCase() === 'g') setGrid(controller.current?.toggleGrid() ?? false); if (e.key.toLowerCase() === 'b' && !e.ctrlKey && !e.metaKey && !e.altKey) toggleSprings.current(); if (e.key === 'Home' || e.key.toLowerCase() === 'f') controller.current?.frameAll(); if (!e.ctrlKey && !e.metaKey && !e.altKey && ['1', '2', '3'].includes(e.key)) applyCameraPreset.current((['full', 'portrait', 'thumbnail'] as const)[Number(e.key) - 1]); if (e.key === 'Escape') { setUrlOpen(false); setCaptureOpen(false); setSelected(null); } }; addEventListener('keydown', keys); return () => removeEventListener('keydown', keys); }, []);
 
   return <main class={`app ${!leftOpen ? 'left-closed' : ''} ${!rightOpen ? 'right-closed' : ''}`} onDragOver={e => e.preventDefault()} onDrop={onDrop}>
     <header class="toolbar">
@@ -586,7 +609,7 @@ function App() {
         <IconButton label="Reload model" onClick={reload} disabled={!reloadSource.current || state === 'parsing'} hideMobile><RefreshCw /></IconButton>
         <span class="toolbar-divider" />
         <IconButton label="Frame model" onClick={() => controller.current?.frameAll()}><Maximize /></IconButton>
-        {(['front', 'back', 'left', 'right'] as const).map(view => <button class="view-button hide-mobile" onClick={() => controller.current?.setView(view)} title={`${view} view`}>{view[0].toUpperCase()}</button>)}
+        {(['front', 'back', 'left', 'right'] as const).map(view => <button class="view-button hide-mobile" onClick={() => { controller.current?.setView(view); setCameraPreset(''); }} title={`${view} view`}>{view[0].toUpperCase()}</button>)}
         <IconButton label="Turntable" active={turntable} onClick={() => setTurntable(controller.current?.toggleTurntable() ?? false)} hideMobile>{turntable ? <Square /> : <Play />}</IconButton>
         <IconButton label="Grid" active={grid} onClick={() => setGrid(controller.current?.toggleGrid() ?? false)} hideMobile><Grid3X3 /></IconButton>
         <IconButton label={springLabel} active={isVRM && springs.visible} disabled={!isVRM} onClick={() => toggleSprings.current()} hideMobile><Waypoints /></IconButton>
@@ -598,7 +621,7 @@ function App() {
       <input ref={backgroundInput} hidden type="file" accept="image/*" onChange={e => { const file = e.currentTarget.files?.[0]; if (file) openBackground(file); e.currentTarget.value = ''; }} />
     </header>
     <aside class="left-panel"><Explorer model={model} filter={filter} setFilter={setFilter} selected={selected} setSelected={setSelected} onFrame={frameItem} /></aside>
-    <section class="viewport" data-selection-kind={highlight.kind} data-selection-count={highlight.count} data-spring-visible={isVRM && springs.visible} data-spring-joints={springs.joints} data-spring-colliders={springs.colliders}>
+    <section class="viewport" data-camera-preset={cameraPreset || undefined} data-selection-kind={highlight.kind} data-selection-count={highlight.count} data-spring-visible={isVRM && springs.visible} data-spring-joints={springs.joints} data-spring-colliders={springs.colliders}>
       <canvas ref={canvasRef} aria-label={model ? `3D view of ${model.name}` : 'Empty 3D model viewport'} />
       {state === 'idle' && <EmptyState onOpen={() => fileInput.current?.click()} onUrl={() => setUrlOpen(true)} onFreebie={() => void loadFreebie()} />}
       {state === 'parsing' && <div class="loading"><div class="spinner" /><b>Opening {fileName}</b><span>{progress ? `${Math.round(progress * 100)}%` : 'Reading model…'}</span><div class="progress"><i style={{ width: `${Math.max(8, progress * 100)}%` }} /></div></div>}
@@ -607,7 +630,7 @@ function App() {
       <button class="panel-toggle right-toggle" onClick={() => setRightOpen(!rightOpen)} aria-label="Toggle inspector"><PanelRightClose /></button>
       {model && <div class="viewport-badge"><span class="status-dot" />{model.format} {model.version}</div>}
     </section>
-    <aside class="right-panel"><div class="panel-tabs"><button class={rightTab === 'inspector' ? 'active' : ''} onClick={() => setRightTab('inspector')}>Inspector</button><button class={rightTab === 'scene' ? 'active' : ''} onClick={() => setRightTab('scene')}>Scene</button><button class={rightTab === 'animation' ? 'active' : ''} onClick={() => setRightTab('animation')}>Animation <small>(beta)</small></button><button class={rightTab === 'bake' ? 'active' : ''} onClick={() => setRightTab('bake')}>Bake <small>(beta)</small></button></div>{rightTab === 'inspector' ? <Inspector model={model} selected={selected} materialDetails={materialDetails} expressionValues={expressionValues} onExpression={expression} onReset={resetExpressions} onFrameSelection={() => controller.current?.frameSelection()} /> : rightTab === 'scene' ? <ScenePanel settings={sceneSettings} error={sceneError} onChange={changeScene} onFile={() => backgroundInput.current?.click()} onUrl={openBackgroundUrl} onReset={resetScene} /> : rightTab === 'animation' ? <AnimationPanel model={model} animation={animation} speed={animationSpeed} loop={animationLoop} inPlace={inPlace} onPreset={choosePreset} onImport={() => animationInput.current?.click()} onPlayPause={playPause} onStop={() => controller.current?.stopAnimation()} onSeek={time => controller.current?.seekAnimation(time)} onSpeed={changeSpeed} onLoop={changeLoop} onInPlace={changeInPlace} onResetPose={() => controller.current?.stopAnimation(true)} /> : <BakePanel model={model} source={sourceFile} bake={bake} mergeMeshes={mergeMeshes} onMergeMeshes={setMergeMeshes} onBake={() => void startBake()} onCancel={() => cancelBake(true)} />}</aside>
+    <aside class="right-panel"><div class="panel-tabs"><button class={rightTab === 'inspector' ? 'active' : ''} onClick={() => setRightTab('inspector')}>Inspector</button><button class={rightTab === 'scene' ? 'active' : ''} onClick={() => setRightTab('scene')}>Scene</button><button class={rightTab === 'animation' ? 'active' : ''} onClick={() => setRightTab('animation')}>Animation <small>(beta)</small></button><button class={rightTab === 'bake' ? 'active' : ''} onClick={() => setRightTab('bake')}>Bake <small>(beta)</small></button></div>{rightTab === 'inspector' ? <Inspector model={model} selected={selected} materialDetails={materialDetails} expressionValues={expressionValues} onExpression={expression} onReset={resetExpressions} onFrameSelection={() => controller.current?.frameSelection()} /> : rightTab === 'scene' ? <ScenePanel settings={sceneSettings} error={sceneError} hasModel={!!model} cameraPreset={cameraPreset} onChange={changeScene} onFile={() => backgroundInput.current?.click()} onUrl={openBackgroundUrl} onReset={resetScene} onCameraPreset={preset => applyCameraPreset.current(preset)} /> : rightTab === 'animation' ? <AnimationPanel model={model} animation={animation} speed={animationSpeed} loop={animationLoop} inPlace={inPlace} onPreset={choosePreset} onImport={() => animationInput.current?.click()} onPlayPause={playPause} onStop={() => controller.current?.stopAnimation()} onSeek={time => controller.current?.seekAnimation(time)} onSpeed={changeSpeed} onLoop={changeLoop} onInPlace={changeInPlace} onResetPose={() => controller.current?.stopAnimation(true)} /> : <BakePanel model={model} source={sourceFile} bake={bake} mergeMeshes={mergeMeshes} onMergeMeshes={setMergeMeshes} onBake={() => void startBake()} onCancel={() => cancelBake(true)} />}</aside>
     <footer class="statusbar">
       <span class="status-summary"><span class={`status-dot ${state}`} />{state === 'ready' ? 'Ready' : state === 'idle' ? 'Waiting for model' : state}</span>
       <span class="footer-credit"><button onClick={() => showLegal('terms')}>Terms</button><i>·</i><button onClick={() => showLegal('privacy')}>Privacy</button><i>·</i><button onClick={() => showLegal('licences')}>Licences</button><i>·</i><a href="https://github.com/ToxSam/open-source-avatars" target="_blank" rel="noreferrer">Free VRMs by ToxSam</a><i>·</i><a href="https://quaternius.com/packs/universalanimationlibrary2.html" target="_blank" rel="noreferrer">Animations by Quaternius</a><i>·</i><span>built for <a href="https://vrm.dev/" target="_blank" rel="noreferrer">VRM</a> by <a href="https://deac.online/" target="_blank" rel="noreferrer">deac.online</a> at <a href="https://worldbuild.io/" target="_blank" rel="noreferrer">worldbuild.io</a> with codex</span></span>

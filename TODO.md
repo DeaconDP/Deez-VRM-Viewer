@@ -2,6 +2,13 @@
 
 Current epic: **E3 · Look dev and capture** (see [ROADMAP.md](ROADMAP.md)). E2 is done, awaiting merge in PRs #8 and #9.
 
+## E3 · Look dev and capture
+
+- [x] Persist scene settings between sessions (local only): lighting, exposure, background colour and grid are saved in this browser (`deez-vrm-viewer:scene:v1`); background images are never stored; "Reset scene" clears the saved value
+- [x] Camera presets: full body, portrait, VRChat-style thumbnail framing (Scene panel "Camera" or keys `1` / `2` / `3`; humanoid bones for VRM, bounding box for glTF)
+- [ ] Transparent capture at custom resolutions
+- [ ] Short turntable or animation capture to WebM/GIF
+
 ## E2 · Inspect deeper (done, awaiting merge in PRs #8, #9)
 
 - [x] Selecting a mesh, bone, node or material in the explorer highlights it in the viewport (double-click or Inspector "Frame selection" frames it; click again or Escape clears)
