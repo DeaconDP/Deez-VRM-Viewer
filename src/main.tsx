@@ -32,6 +32,7 @@ const FREEBIE_REGISTRIES = [
   'https://raw.githubusercontent.com/ToxSam/open-source-avatars/main/data/avatars/100avatars-r3.json'
 ] as const;
 
+type ReloadSource = { kind: 'file'; file: File } | { kind: 'url'; url: string; name: string };
 interface FreebieAvatar { name?: string; model_file_url?: string; format?: string; is_public?: boolean }
 
 const hasAcceptedLegal = () => {
@@ -46,10 +47,13 @@ const EMPTY_BAKE: BakeUiState = { status: 'idle', stage: 'preflight', progress: 
 interface SceneSettings { key: number; fill: number; rim: number; exposure: number; backgroundMode: 'color' | 'image'; backgroundColor: string; backgroundName: string }
 const DEFAULT_SCENE: SceneSettings = { key: 3.4, fill: 2.2, rim: 2.4, exposure: 1.05, backgroundMode: 'color', backgroundColor: '#70777d', backgroundName: '' };
 
+const EXPLORER_GROUPS = ['Nodes', 'Meshes', 'Humanoid', 'Expressions', 'Materials'] as const;
+const DEFAULT_OPEN_GROUPS: Record<string, boolean> = { Meshes: true, Expressions: true };
+
 const formatBytes = (bytes: number) => bytes > 1024 ** 2 ? `${(bytes / 1024 ** 2).toFixed(1)} MB` : `${Math.ceil(bytes / 1024)} KB`;
 
-function IconButton({ label, active, onClick, children, hideMobile = false }: { label: string; active?: boolean; onClick?: () => void; children: ComponentChildren; hideMobile?: boolean }) {
-  return <button class={`icon-button ${active ? 'active' : ''} ${hideMobile ? 'hide-mobile' : ''}`} aria-label={label} title={label} onClick={onClick}>{children}</button>;
+function IconButton({ label, active, disabled, onClick, children, hideMobile = false }: { label: string; active?: boolean; disabled?: boolean; onClick?: () => void; children: ComponentChildren; hideMobile?: boolean }) {
+  return <button class={`icon-button ${active ? 'active' : ''} ${hideMobile ? 'hide-mobile' : ''}`} aria-label={label} title={label} disabled={disabled} onClick={onClick}>{children}</button>;
 }
 
 function Accordion({ title, open = false, children }: { title: string; open?: boolean; children: ComponentChildren }) {
@@ -84,13 +88,17 @@ function Explorer({ model, filter, setFilter, selected, setSelected }: { model: 
     const query = filter.trim().toLowerCase();
     return itemGroups.map(([name, items]) => [name, query ? items.filter(i => i.label.toLowerCase().includes(query)) : items] as [string, TreeItem[]]);
   }, [model, filter]);
+  const [openGroups, setOpenGroups] = useState(DEFAULT_OPEN_GROUPS);
+  const allOpen = EXPLORER_GROUPS.every(name => openGroups[name]);
+  const toggleAll = () => setOpenGroups(Object.fromEntries(EXPLORER_GROUPS.map(name => [name, !allOpen])));
+  const moreLabel = allOpen ? 'Collapse all groups' : 'Expand all groups';
   return <div class="panel-content explorer">
-    <div class="panel-heading"><div><span class="eyebrow">MODEL STRUCTURE</span><h2>Scene Explorer</h2></div><button class="more">•••</button></div>
+    <div class="panel-heading"><div><span class="eyebrow">MODEL STRUCTURE</span><h2>Scene Explorer</h2></div><button class="more" disabled={!model} aria-label={moreLabel} title={moreLabel} onClick={toggleAll}>•••</button></div>
     <label class="search"><Search /><input value={filter} onInput={e => setFilter(e.currentTarget.value)} placeholder="Filter scene" aria-label="Filter scene" /></label>
     <div class="tree" role="tree">
       <div class="tree-root"><ChevronDown /><Box /><span>{model?.name ?? 'Scene'}</span></div>
       {!model && <p class="muted tree-empty">Open a model to inspect its contents.</p>}
-      {groups.map(([name, items]) => <details open={name === 'Expressions' || name === 'Meshes'} key={name}>
+      {groups.map(([name, items]) => <details open={!!openGroups[name]} onToggle={e => { const open = e.currentTarget.open; setOpenGroups(old => !!old[name] === open ? old : { ...old, [name]: open }); }} key={name}>
         <summary><span>{name}</span><b>{items.length}</b></summary>
         {items.slice(0, 250).map(item => <button role="treeitem" class={selected?.id === item.id ? 'selected' : ''} onClick={() => setSelected(item)} key={item.id}>
           <span class={`item-dot ${item.kind}`} /> <span>{item.label}</span>{item.detail && <small>{item.detail}</small>}
@@ -254,7 +262,7 @@ function LegalDialog({ view, setView, mustAccept, onAccept, onClose }: { view: L
 
 function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null), fileInput = useRef<HTMLInputElement>(null), animationInput = useRef<HTMLInputElement>(null), backgroundInput = useRef<HTMLInputElement>(null), controller = useRef<Controller | null>(null), objectUrl = useRef(''), animationUrl = useRef(''), backgroundUrl = useRef('');
-  const bakeWorker = useRef<Worker | null>(null), bakeGeneration = useRef(0);
+  const bakeWorker = useRef<Worker | null>(null), bakeGeneration = useRef(0), loadGeneration = useRef(0), loadInFlight = useRef(false), reloadSource = useRef<ReloadSource | null>(null);
   const [state, setState] = useState<LoadState>('idle'), [progress, setProgress] = useState(0), [error, setError] = useState('');
   const [model, setModel] = useState<ModelSummary | null>(null), [fileName, setFileName] = useState('No model open');
   const [leftOpen, setLeftOpen] = useState(true), [rightOpen, setRightOpen] = useState(true), [filter, setFilter] = useState('');
@@ -266,11 +274,11 @@ function App() {
   const [mergeMeshes, setMergeMeshes] = useState(true);
   const [animationSpeed, setAnimationSpeed] = useState(1), [animationLoop, setAnimationLoop] = useState<AnimationLoopMode>('repeat'), [inPlace, setInPlace] = useState(true);
   const [legalAccepted, setLegalAccepted] = useState(hasAcceptedLegal), [legalView, setLegalView] = useState<LegalView>('about'), [legalOpen, setLegalOpen] = useState(false);
-  const [viewerReady, setViewerReady] = useState(false);
+  const [viewerReady, setViewerReady] = useState(false), [fps, setFps] = useState<number | null>(null);
 
   useEffect(() => {
     let live = true;
-    import('./viewer/ViewerController').then(({ ViewerController }) => { if (live && canvasRef.current) { controller.current = new ViewerController(canvasRef.current); controller.current.setAnimationListener(setAnimation); controller.current.setLighting(sceneSettings.key, sceneSettings.fill, sceneSettings.rim, sceneSettings.exposure); controller.current.setBackgroundColor(sceneSettings.backgroundColor); setViewerReady(true); } });
+    import('./viewer/ViewerController').then(({ ViewerController }) => { if (live && canvasRef.current) { controller.current = new ViewerController(canvasRef.current); controller.current.setAnimationListener(setAnimation); controller.current.setFpsListener(setFps); controller.current.setLighting(sceneSettings.key, sceneSettings.fill, sceneSettings.rim, sceneSettings.exposure); controller.current.setBackgroundColor(sceneSettings.backgroundColor); setViewerReady(true); } });
     return () => { live = false; bakeWorker.current?.terminate(); controller.current?.dispose(); if (objectUrl.current) URL.revokeObjectURL(objectUrl.current); if (animationUrl.current) URL.revokeObjectURL(animationUrl.current); if (backgroundUrl.current) URL.revokeObjectURL(backgroundUrl.current); };
   }, []);
 
@@ -282,43 +290,69 @@ function App() {
 
   const loadUrl = async (url: string, name: string, size = 0) => {
     if (!controller.current) return;
-    setState('parsing'); setProgress(0); setError(''); setSelected(null); setFileName(name);
-    try { const result = await controller.current.load(url, name, size, setProgress); setModel(result); setState('ready'); setSelected(null); return true; }
-    catch (reason) { console.error(reason); setError(reason instanceof Error ? reason.message : String(reason)); setState('error'); setModel(null); return false; }
+    const generation = ++loadGeneration.current;
+    loadInFlight.current = true;
+    setState('parsing'); setProgress(0); setError(''); setSelected(null); setFileName(name); setExpressionValues({});
+    try { const result = await controller.current.load(url, name, size, setProgress); if (generation !== loadGeneration.current) return false; loadInFlight.current = false; setModel(result); setState('ready'); setSelected(null); return true; }
+    catch (reason) { if (generation !== loadGeneration.current) return false; loadInFlight.current = false; console.error(reason); setError(reason instanceof Error ? reason.message : String(reason)); setState('error'); setModel(null); return false; }
+  };
+  /** Shows an open failure and abandons any load still in flight, so an older model cannot replace the error. */
+  const failOpen = (message: string) => {
+    loadGeneration.current++;
+    controller.current?.cancelLoad();
+    if (loadInFlight.current) { loadInFlight.current = false; setModel(null); }
+    setError(message); setState('error');
   };
   const openFile = async (file: File, options?: { preserveBake?: boolean }) => {
     if (!options?.preserveBake) cancelBake(false);
     setSourceFile(null);
     const validationError = await validateModelFile(file);
-    if (validationError) { setError(validationError); setState('error'); return; }
+    if (validationError) { reloadSource.current = { kind: 'file', file }; failOpen(validationError); return; }
     if (file.size > 250 * 1024 * 1024 && !confirm(`${file.name} is larger than 250 MB and may exhaust graphics memory. Open it anyway?`)) return;
+    reloadSource.current = { kind: 'file', file };
     if (objectUrl.current) URL.revokeObjectURL(objectUrl.current); objectUrl.current = URL.createObjectURL(file);
     if (await loadUrl(objectUrl.current, file.name, file.size)) setSourceFile(file);
   };
   useEffect(() => {
     if (!viewerReady || !window.desktop) return;
-    return window.desktop.onOpenModel(({ name, bytes }) => {
+    const stopModels = window.desktop.onOpenModel(({ name, bytes }) => {
       const copy = new Uint8Array(bytes.byteLength);
       copy.set(bytes);
       void openFile(new File([copy.buffer], name, { type: name.toLowerCase().endsWith('.gltf') ? 'model/gltf+json' : 'model/gltf-binary' }));
     });
+    const stopErrors = window.desktop.onOpenError(failOpen);
+    return () => { stopModels(); stopErrors(); };
   }, [viewerReady]);
   const loadFreebie = async () => {
-    cancelBake(false); setSourceFile(null); setState('parsing'); setProgress(0); setError(''); setFileName('Finding a freebie…');
+    cancelBake(false); setSourceFile(null); reloadSource.current = null;
+    // Claim a load generation now: a file opened while the registry downloads must win over this freebie.
+    const generation = ++loadGeneration.current;
+    controller.current?.cancelLoad();
+    setState('parsing'); setProgress(0); setError(''); setFileName('Finding a freebie…');
     try {
       const registryUrl = FREEBIE_REGISTRIES[Math.floor(Math.random() * FREEBIE_REGISTRIES.length)];
       const response = await fetch(registryUrl);
       if (!response.ok) throw new Error(`The freebie registry returned ${response.status}.`);
       const registry = await response.json() as FreebieAvatar[];
+      if (generation !== loadGeneration.current) return;
       const avatars = registry.filter(avatar => avatar.is_public !== false && avatar.format === 'VRM' && typeof avatar.model_file_url === 'string');
       if (!avatars.length) throw new Error('The freebie registry contains no public VRM models.');
       const avatar = avatars[Math.floor(Math.random() * avatars.length)];
       const modelUrl = new URL(avatar.model_file_url!);
       if (modelUrl.protocol !== 'https:') throw new Error('The selected freebie does not use a secure model URL.');
-      await loadUrl(modelUrl.href, `${avatar.name?.trim() || 'Freebie'}.vrm`);
+      const name = `${avatar.name?.trim() || 'Freebie'}.vrm`;
+      reloadSource.current = { kind: 'url', url: modelUrl.href, name };
+      await loadUrl(modelUrl.href, name);
     } catch (reason) {
+      if (generation !== loadGeneration.current) return;
       console.error(reason); setError(reason instanceof Error ? reason.message : String(reason)); setState('error'); setModel(null);
     }
+  };
+  const reload = () => {
+    const source = reloadSource.current;
+    if (!source || state === 'parsing') return;
+    if (source.kind === 'file') void openFile(source.file);
+    else { cancelBake(false); setSourceFile(null); void loadUrl(source.url, source.name); }
   };
   const onDrop = (event: DragEvent) => { event.preventDefault(); const file = event.dataTransfer?.files[0]; if (file) void openFile(file); };
   const expression = (name: string, value: number) => { setExpressionValues(old => ({ ...old, [name]: value })); controller.current?.setExpression(name, value); };
@@ -382,7 +416,7 @@ function App() {
     catch { setSceneError('Enter a valid HTTP or HTTPS image URL.'); }
   };
   const resetScene = () => { setSceneSettings(DEFAULT_SCENE); setSceneError(''); controller.current?.setLighting(DEFAULT_SCENE.key, DEFAULT_SCENE.fill, DEFAULT_SCENE.rim, DEFAULT_SCENE.exposure); controller.current?.setBackgroundColor(DEFAULT_SCENE.backgroundColor); };
-  const submitUrl = (event: SubmitEvent) => { event.preventDefault(); const input = new FormData(event.currentTarget as HTMLFormElement).get('url')?.toString() ?? ''; try { const parsed = new URL(input); if (parsed.protocol !== 'https:' && parsed.hostname !== 'localhost') throw new Error(); cancelBake(false); setSourceFile(null); void loadUrl(parsed.href, parsed.pathname.split('/').pop() || 'Remote model'); setUrlOpen(false); } catch { setError('Enter a valid HTTPS model URL.'); setState('error'); } };
+  const submitUrl = (event: SubmitEvent) => { event.preventDefault(); const input = new FormData(event.currentTarget as HTMLFormElement).get('url')?.toString() ?? ''; try { const parsed = new URL(input); if (parsed.protocol !== 'https:' && parsed.hostname !== 'localhost') throw new Error(); cancelBake(false); setSourceFile(null); const name = parsed.pathname.split('/').pop() || 'Remote model'; reloadSource.current = { kind: 'url', url: parsed.href, name }; void loadUrl(parsed.href, name); setUrlOpen(false); } catch { setError('Enter a valid HTTPS model URL.'); setState('error'); } };
   const acceptLegal = () => { try { localStorage.setItem(LEGAL_ACCEPTANCE_KEY, LEGAL_VERSION); } catch { /* Acceptance remains valid for this session. */ } setLegalAccepted(true); };
   const showLegal = (view: LegalView) => { setLegalView(view); setLegalOpen(true); };
 
@@ -468,7 +502,7 @@ function App() {
       <div class="toolbar-actions primary-actions">
         <IconButton label="Open model" onClick={() => fileInput.current?.click()}><FolderOpen /></IconButton>
         <IconButton label="Open public URL" onClick={() => setUrlOpen(true)} hideMobile><Upload /></IconButton>
-        <IconButton label="Reload model" hideMobile><RefreshCw /></IconButton>
+        <IconButton label="Reload model" onClick={reload} disabled={!reloadSource.current || state === 'parsing'} hideMobile><RefreshCw /></IconButton>
         <span class="toolbar-divider" />
         <IconButton label="Frame model" onClick={() => controller.current?.frameAll()}><Maximize /></IconButton>
         {(['front', 'back', 'left', 'right'] as const).map(view => <button class="view-button hide-mobile" onClick={() => controller.current?.setView(view)} title={`${view} view`}>{view[0].toUpperCase()}</button>)}
@@ -495,7 +529,7 @@ function App() {
     <footer class="statusbar">
       <span class="status-summary"><span class={`status-dot ${state}`} />{state === 'ready' ? 'Ready' : state === 'idle' ? 'Waiting for model' : state}</span>
       <span class="footer-credit"><button onClick={() => showLegal('terms')}>Terms</button><i>·</i><button onClick={() => showLegal('privacy')}>Privacy</button><i>·</i><button onClick={() => showLegal('licences')}>Licences</button><i>·</i><a href="https://github.com/ToxSam/open-source-avatars" target="_blank" rel="noreferrer">Free VRMs by ToxSam</a><i>·</i><a href="https://quaternius.com/packs/universalanimationlibrary2.html" target="_blank" rel="noreferrer">Animations by Quaternius</a><i>·</i><span>built for <a href="https://vrm.dev/" target="_blank" rel="noreferrer">VRM</a> by <a href="https://deac.online/" target="_blank" rel="noreferrer">deac.online</a> at <a href="https://worldbuild.io/" target="_blank" rel="noreferrer">worldbuild.io</a> with codex</span></span>
-      <div class="model-summary">{model && <><span>{model.meshes} meshes</span><span>{model.triangles.toLocaleString()} tris</span><span>{formatBytes(model.size)}</span></>}<span class="fps"><Gauge /> 60 FPS</span></div>
+      <div class="model-summary">{model && <><span>{model.meshes} meshes</span><span>{model.triangles.toLocaleString()} tris</span><span>{formatBytes(model.size)}</span></>}<span class="fps" title="Frames per second while the viewport is animating"><Gauge /> {fps === null ? 'Idle' : `${fps} FPS`}</span></div>
     </footer>
     {urlOpen && <div class="modal-backdrop" onClick={() => setUrlOpen(false)}><form class="dialog" onSubmit={submitUrl} onClick={e => e.stopPropagation()}><div class="dialog-head"><h2>Open public URL</h2><button type="button" onClick={() => setUrlOpen(false)}><X /></button></div><p>The server must allow browser access (CORS). The model is never uploaded anywhere else.</p><input name="url" type="url" required autoFocus placeholder="https://example.com/avatar.vrm" /><div class="dialog-actions"><button type="button" class="secondary" onClick={() => setUrlOpen(false)}>Cancel</button><button class="primary">Open model</button></div></form></div>}
     {captureOpen && <div class="modal-backdrop" onClick={() => setCaptureOpen(false)}><div class="dialog" onClick={e => e.stopPropagation()}><div class="dialog-head"><h2>Save screenshot</h2><button onClick={() => setCaptureOpen(false)}><X /></button></div><p>Export the current camera view as a PNG. Everything stays local.</p><div class="capture-grid"><button onClick={() => screenshot(false, 1)}><Download /><b>Current view</b><span>Background · 1×</span></button><button onClick={() => screenshot(true, 2)}><Download /><b>Transparent 2×</b><span>High resolution</span></button></div></div></div>}
