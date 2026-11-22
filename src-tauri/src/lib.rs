@@ -133,7 +133,9 @@ fn is_model_path(path: &str) -> bool {
 
 fn is_export_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
-    lower.ends_with(".vrm") || lower.ends_with(".png")
+    [".vrm", ".png", ".webm", ".mp4"]
+        .iter()
+        .any(|extension| lower.ends_with(extension))
 }
 
 fn model_path_from_args(args: &[String]) -> Option<PathBuf> {
@@ -219,7 +221,7 @@ fn take_pending_model_path(pending: State<'_, PendingModel>) -> Option<String> {
 #[tauri::command]
 fn write_export_file(path: String, bytes: Vec<u8>) -> Result<(), String> {
     if !is_export_path(&path) {
-        return Err("Exports must be saved as .vrm or .png.".into());
+        return Err("Exports must be saved as .vrm, .png, .webm, or .mp4.".into());
     }
     if bytes.is_empty() {
         return Err("Refusing to write an empty export.".into());
@@ -438,15 +440,40 @@ mod tests {
     }
 
     #[test]
-    fn is_export_path_accepts_vrm_and_png_any_case() {
-        for path in ["out.vrm", "out.VRM", "shot.png", "shot.PNG", "dir/shot.Png"] {
+    fn is_export_path_accepts_vrm_png_and_video_any_case() {
+        for path in [
+            "out.vrm",
+            "out.VRM",
+            "shot.png",
+            "shot.PNG",
+            "dir/shot.Png",
+            "spin.webm",
+            "spin.WEBM",
+            "spin.WebM",
+            "clip.mp4",
+            "clip.MP4",
+            r"C:\exports\avatar-turntable.webm",
+        ] {
             assert!(is_export_path(path), "expected {path:?} to be accepted");
         }
     }
 
     #[test]
     fn is_export_path_rejects_other_extensions() {
-        for path in ["", "out.glb", "out.gltf", "evil.exe", "out.vrm.exe", "out.png.bak"] {
+        for path in [
+            "",
+            "out.glb",
+            "out.gltf",
+            "evil.exe",
+            "out.vrm.exe",
+            "out.png.bak",
+            "spin.webm.exe",
+            "clip.mp4.bak",
+            "clip.mov",
+            "anim.gif",
+            "webm",
+            "foomp4",
+        ] {
             assert!(!is_export_path(path), "expected {path:?} to be rejected");
         }
     }
@@ -533,12 +560,12 @@ mod tests {
 
     #[test]
     fn write_export_file_rejects_non_export_paths() {
-        for name in ["out.glb", "out.exe", "out.vrm.exe"] {
+        for name in ["out.glb", "out.exe", "out.vrm.exe", "spin.webm.exe"] {
             let path = unique_temp_path(name);
             let result = write_export_file(path_string(&path), vec![1, 2, 3]);
             assert_eq!(
                 result,
-                Err("Exports must be saved as .vrm or .png.".to_string()),
+                Err("Exports must be saved as .vrm, .png, .webm, or .mp4.".to_string()),
                 "for {name}"
             );
             assert!(!path.exists());
@@ -565,5 +592,21 @@ mod tests {
         assert_eq!(result, Ok(()));
         assert_eq!(written.expect("read back export"), content);
         assert!(!root.exists());
+    }
+
+    #[test]
+    fn write_export_file_writes_video_files() {
+        let root = unique_temp_path("video-dir");
+        for name in ["spin.webm", "clip.MP4"] {
+            let path = root.join(name);
+            let content = vec![0x1a, 0x45, 0xdf, 0xa3, 1, 2];
+            assert_eq!(
+                write_export_file(path_string(&path), content.clone()),
+                Ok(()),
+                "for {name}"
+            );
+            assert_eq!(std::fs::read(&path).expect("read back video"), content);
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
