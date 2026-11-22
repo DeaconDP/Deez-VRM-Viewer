@@ -10,10 +10,12 @@ import type { AnimationLoopMode, AnimationState, LicenceInfo, LoadState, Materia
 import { BAKE_LIMITS, type BakeStage, type BakeStats, type BakeWorkerResponse } from './bake/types';
 import { validateModelFile } from './platform/files';
 import { installDesktopBridge } from './platform/desktopBridge';
-import { saveLocalFile } from './platform/exportFile';
+import { EXPORT_FILTERS, saveLocalFile } from './platform/exportFile';
 import { QUATERNIUS_LIBRARIES } from './viewer/quaterniusAnimations';
 import { virtualWindow } from './ui/virtualWindow';
 import { clearSceneSettings, DEFAULT_SCENE, loadSceneSettings, saveSceneSettings, type SceneSettings } from './ui/sceneSettingsStore';
+import { CaptureDialog } from './ui/CaptureDialog';
+import { captureFileName } from './ui/captureSizes';
 import termsUrl from '../TERMS.md?url';
 import privacyUrl from '../PRIVACY.md?url';
 import licenseUrl from '../LICENSE?url';
@@ -461,27 +463,19 @@ function App() {
   const onDrop = (event: DragEvent) => { event.preventDefault(); const file = event.dataTransfer?.files[0]; if (file) void openFile(file); };
   const expression = (name: string, value: number) => { setExpressionValues(old => ({ ...old, [name]: value })); controller.current?.setExpression(name, value); };
   const resetExpressions = () => { setExpressionValues({}); controller.current?.resetExpressions(); };
-  const screenshot = (transparent: boolean, scale: number) => {
-    const dataUrl = controller.current?.capture(transparent, scale) ?? '';
-    if (!dataUrl) return;
-    const fileName = `${model?.name ?? 'deez-vrm'}-${Date.now()}.png`;
-    void (async () => {
-      try {
-        const bytes = new Uint8Array(await (await fetch(dataUrl)).arrayBuffer());
-        const result = await saveLocalFile({
-          bytes,
-          fileName,
-          mimeType: 'image/png',
-          title: 'Save screenshot',
-          filters: [{ name: 'PNG image', extensions: ['png'] }]
-        });
-        if (!result.saved) return;
-      } catch (reason) {
-        console.error(reason);
-      } finally {
-        setCaptureOpen(false);
-      }
-    })();
+  /** Renders and saves a PNG at an exact size. Resolves false when the save dialog was dismissed; errors reach the dialog. */
+  const screenshot = async (options: { width: number; height: number; transparent: boolean }) => {
+    if (!controller.current) throw new Error('The viewer is still starting.');
+    const dataUrl = controller.current.captureImage(options);
+    const bytes = new Uint8Array(await (await fetch(dataUrl)).arrayBuffer());
+    const result = await saveLocalFile({
+      bytes,
+      fileName: captureFileName(model?.name, options),
+      mimeType: 'image/png',
+      title: 'Save screenshot',
+      filters: [EXPORT_FILTERS.png]
+    });
+    return result.saved;
   };
   const choosePreset = (id: BuiltInAnimationId) => { void controller.current?.loadBuiltInAnimation(id).catch(reason => setAnimation(old => ({ ...old, error: reason instanceof Error ? reason.message : String(reason) }))); };
   const openAnimation = async (file: File) => {
@@ -637,7 +631,7 @@ function App() {
       <div class="model-summary">{model && <><span>{model.meshes} meshes</span><span>{model.triangles.toLocaleString()} tris</span><span>{formatBytes(model.size)}</span></>}<span class="fps" title="Frames per second while the viewport is animating"><Gauge /> {fps === null ? 'Idle' : `${fps} FPS`}</span></div>
     </footer>
     {urlOpen && <div class="modal-backdrop" onClick={() => setUrlOpen(false)}><form class="dialog" onSubmit={submitUrl} onClick={e => e.stopPropagation()}><div class="dialog-head"><h2>Open public URL</h2><button type="button" onClick={() => setUrlOpen(false)}><X /></button></div><p>The server must allow browser access (CORS). The model is never uploaded anywhere else.</p><input name="url" type="url" required autoFocus placeholder="https://example.com/avatar.vrm" /><div class="dialog-actions"><button type="button" class="secondary" onClick={() => setUrlOpen(false)}>Cancel</button><button class="primary">Open model</button></div></form></div>}
-    {captureOpen && <div class="modal-backdrop" onClick={() => setCaptureOpen(false)}><div class="dialog" onClick={e => e.stopPropagation()}><div class="dialog-head"><h2>Save screenshot</h2><button onClick={() => setCaptureOpen(false)}><X /></button></div><p>Export the current camera view as a PNG. Everything stays local.</p><div class="capture-grid"><button onClick={() => screenshot(false, 1)}><Download /><b>Current view</b><span>Background · 1×</span></button><button onClick={() => screenshot(true, 2)}><Download /><b>Transparent 2×</b><span>High resolution</span></button></div></div></div>}
+    {captureOpen && <CaptureDialog controller={viewerReady ? controller.current : null} modelName={model?.name} hasModel={!!model} hasAnimation={animation.duration > 0} onSaveImage={screenshot} onClose={() => setCaptureOpen(false)} />}
     {(!legalAccepted || legalOpen) && <LegalDialog view={legalView} setView={setLegalView} mustAccept={!legalAccepted} onAccept={acceptLegal} onClose={() => setLegalOpen(false)} />}
   </main>;
 }
