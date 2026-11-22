@@ -1,8 +1,8 @@
 # TODO
 
-Current epic: **E2 · Inspect deeper** (see [ROADMAP.md](ROADMAP.md)).
+Current epic: **E3 · Look dev and capture** (see [ROADMAP.md](ROADMAP.md)). E2 is done, awaiting merge in PRs #8 and #9.
 
-## E2 · Inspect deeper
+## E2 · Inspect deeper (done, awaiting merge in PRs #8, #9)
 
 - [x] Selecting a mesh, bone, node or material in the explorer highlights it in the viewport (double-click or Inspector "Frame selection" frames it; click again or Escape clears)
 - [x] Material inspector: shader (MToon / PBR), textures with thumbnails, alpha mode

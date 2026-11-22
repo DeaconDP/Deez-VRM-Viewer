@@ -23,7 +23,7 @@ Every visible control must do what it says, and every failure must reach the use
 - Desktop open, drop and file-association errors show in the viewport instead of only the console
 - Rust unit tests for the path guards in `src-tauri/src/lib.rs`
 
-## E2 · Inspect deeper (In progress)
+## E2 · Inspect deeper (PRs #8, #9)
 
 - Selecting a mesh or bone in the explorer highlights it in the viewport
 - Material inspector: shader (MToon / PBR), textures with thumbnails, alpha mode
@@ -31,7 +31,7 @@ Every visible control must do what it says, and every failure must reach the use
 - VRM licence fields shown in full (allowed users, commercial use, redistribution)
 - Explorer lists beyond 250 items per group (virtualised list)
 
-## E3 · Look dev and capture
+## E3 · Look dev and capture (Next)
 
 - Persist scene settings between sessions (local only)
 - Camera presets: portrait, full body, VRChat-style thumbnail framing
