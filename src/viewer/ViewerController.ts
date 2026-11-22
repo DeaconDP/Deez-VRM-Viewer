@@ -5,6 +5,7 @@ import { VRMLoaderPlugin, VRMUtils, type VRM } from '@pixiv/three-vrm';
 import { createVRMAnimationClip, VRMAnimationLoaderPlugin, type VRMAnimation } from '@pixiv/three-vrm-animation';
 import type { AnimationLoopMode, AnimationState, ModelSummary } from '../types';
 import { DuplicateBoneSync } from './duplicateBoneSync';
+import { createFpsMeter } from './fpsMeter';
 import { retargetQuaterniusClip, type QuaterniusAnimationId, type QuaterniusLibraryId } from './quaterniusAnimations';
 
 export type BuiltInAnimationId = QuaterniusAnimationId;
@@ -40,6 +41,9 @@ export class ViewerController {
   private inPlace = true;
   private duplicateBoneSync: DuplicateBoneSync | null = null;
   private quaterniusLibraries = new Map<QuaterniusLibraryId, { scene: THREE.Group; animations: THREE.AnimationClip[] }>();
+  private fpsMeter = createFpsMeter();
+  private fpsListener: ((fps: number | null) => void) | null = null;
+  private loadRequest = 0;
   private quaterniusLoads = new Map<QuaterniusLibraryId, Promise<{ scene: THREE.Group; animations: THREE.AnimationClip[] }>>();
 
   constructor(private canvas: HTMLCanvasElement) {
@@ -74,6 +78,12 @@ export class ViewerController {
     listener({ ...this.animationState });
   }
 
+  /** Receives measured fps while the render loop runs (at most ~2x/second), and null when it goes idle. */
+  setFpsListener(listener: ((fps: number | null) => void) | null) {
+    this.fpsListener = listener;
+    listener?.(this.animate ? this.fpsMeter.read(performance.now()) : null);
+  }
+
   private emitAnimation(patch: Partial<AnimationState> = {}) {
     this.animationState = { ...this.animationState, ...patch };
     this.animationListener?.({ ...this.animationState });
@@ -105,19 +115,30 @@ export class ViewerController {
     if (this.turntable && this.model) this.model.rotation.y += delta * 0.35;
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
+    const now = performance.now();
+    this.fpsMeter.frame(now);
+    const fps = this.fpsMeter.poll(now);
+    if (fps !== undefined) this.fpsListener?.(fps);
     this.raf = requestAnimationFrame(this.tick);
   };
 
   render = () => this.renderer.render(this.scene, this.camera);
-  private startLoop() { if (!this.animate) { this.animate = true; this.clock.start(); this.tick(); } }
-  private stopLoop() { if (!this.turntable && !this.animationState.playing) { this.animate = false; cancelAnimationFrame(this.raf); this.render(); } }
+  private startLoop() { if (!this.animate) { this.animate = true; this.fpsMeter.reset(); this.clock.start(); this.tick(); } }
+  private stopLoop() {
+    if (this.turntable || this.animationState.playing) return;
+    const wasRunning = this.animate;
+    this.animate = false; cancelAnimationFrame(this.raf); this.render();
+    if (wasRunning) { this.fpsMeter.reset(); this.fpsListener?.(null); }
+  }
 
   async load(url: string, fileName: string, size: number, onProgress: (n: number) => void): Promise<ModelSummary> {
     const started = performance.now();
+    const request = ++this.loadRequest;
     this.unload();
     const loader = new GLTFLoader();
     loader.register(parser => new VRMLoaderPlugin(parser));
-    const gltf = await loader.loadAsync(url, event => event.total && onProgress(event.loaded / event.total));
+    const gltf = await loader.loadAsync(url, event => request === this.loadRequest && event.total && onProgress(event.loaded / event.total));
+    if (request !== this.loadRequest) { this.disposeObject(gltf.userData.vrm?.scene ?? gltf.scene); throw new Error('A newer model load replaced this one.'); }
     this.vrm = gltf.userData.vrm ?? null;
     this.model = this.vrm?.scene ?? gltf.scene;
     if (this.vrm) {
@@ -165,17 +186,25 @@ export class ViewerController {
     };
   }
 
+  /** Abandons any in-flight load; its result is disposed instead of being added to the scene. */
+  cancelLoad() { this.loadRequest++; }
+
   unload() {
     this.clearAnimation();
+    this.stopLoop();
     if (!this.model) return;
     this.scene.remove(this.model);
-    this.model.traverse(object => {
+    this.disposeObject(this.model);
+    this.vrm = null; this.model = null; this.mixer = null; this.duplicateBoneSync = null; this.render();
+  }
+
+  private disposeObject(root: THREE.Object3D) {
+    root.traverse(object => {
       const mesh = object as THREE.Mesh;
       mesh.geometry?.dispose();
       const mats = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : [];
       mats.forEach(material => { Object.values(material).forEach(v => v instanceof THREE.Texture && v.dispose()); material.dispose(); });
     });
-    this.vrm = null; this.model = null; this.mixer = null; this.duplicateBoneSync = null; this.render();
   }
 
   frameAll() {

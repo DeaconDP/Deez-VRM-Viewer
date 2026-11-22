@@ -373,3 +373,197 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    /// Unique scratch path under the system temp dir; nothing is created yet.
+    fn unique_temp_path(label: &str) -> PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "deez-vrm-test-{}-{nanos}-{n}-{label}",
+            std::process::id()
+        ))
+    }
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn path_string(path: &Path) -> String {
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn is_model_path_accepts_model_extensions_any_case() {
+        for path in [
+            "avatar.vrm",
+            "avatar.VRM",
+            "Avatar.Vrm",
+            "scene.glb",
+            "scene.GLB",
+            "scene.gltf",
+            "scene.GlTf",
+            r"C:\models\avatar.vrm",
+            "/home/user/models/avatar.glb",
+        ] {
+            assert!(is_model_path(path), "expected {path:?} to be accepted");
+        }
+    }
+
+    #[test]
+    fn is_model_path_rejects_non_model_paths() {
+        for path in [
+            "",
+            "dance.vrma",
+            "texture.png",
+            "scene.gltf.bak",
+            "avatar",
+            "foovrm",
+            r"C:\models\vrm",
+            "/models/glb",
+            "avatar.vrm.exe",
+        ] {
+            assert!(!is_model_path(path), "expected {path:?} to be rejected");
+        }
+    }
+
+    #[test]
+    fn is_export_path_accepts_vrm_and_png_any_case() {
+        for path in ["out.vrm", "out.VRM", "shot.png", "shot.PNG", "dir/shot.Png"] {
+            assert!(is_export_path(path), "expected {path:?} to be accepted");
+        }
+    }
+
+    #[test]
+    fn is_export_path_rejects_other_extensions() {
+        for path in ["", "out.glb", "out.gltf", "evil.exe", "out.vrm.exe", "out.png.bak"] {
+            assert!(!is_export_path(path), "expected {path:?} to be rejected");
+        }
+    }
+
+    #[test]
+    fn model_path_from_args_skips_argv0_even_if_it_looks_like_a_model() {
+        assert_eq!(model_path_from_args(&args(&["viewer.vrm"])), None);
+        assert_eq!(
+            model_path_from_args(&args(&["viewer.vrm", "real.glb"])),
+            Some(PathBuf::from("real.glb"))
+        );
+    }
+
+    #[test]
+    fn model_path_from_args_returns_first_model_and_ignores_flags() {
+        let argv = args(&[
+            "deez-vrm-viewer.exe",
+            "--flag",
+            "--verbose=1",
+            "notes.txt",
+            "first.vrm",
+            "second.gltf",
+        ]);
+        assert_eq!(model_path_from_args(&argv), Some(PathBuf::from("first.vrm")));
+    }
+
+    #[test]
+    fn model_path_from_args_returns_none_without_models() {
+        assert_eq!(model_path_from_args(&[]), None);
+        assert_eq!(model_path_from_args(&args(&["app.exe"])), None);
+        assert_eq!(
+            model_path_from_args(&args(&["app.exe", "--flag", "image.png", "dance.vrma"])),
+            None
+        );
+    }
+
+    #[test]
+    fn read_model_file_rejects_non_model_extension_without_touching_fs() {
+        // Path does not exist; the extension check must fire before any IO.
+        let path = unique_temp_path("not-a-model.png");
+        let error = match read_model_file(path_string(&path)) {
+            Err(error) => error,
+            Ok(_) => panic!("expected an error for a non-model extension"),
+        };
+        assert_eq!(error, "Choose a .vrm, .glb, or .gltf model.");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn read_model_file_rejects_empty_file() {
+        let path = unique_temp_path("empty.vrm");
+        std::fs::write(&path, b"").expect("create empty temp file");
+        let result = read_model_file(path_string(&path));
+        let _ = std::fs::remove_file(&path);
+        match result {
+            Err(error) => assert_eq!(error, "This file is empty and cannot be opened."),
+            Ok(_) => panic!("expected an error for an empty file"),
+        }
+    }
+
+    #[test]
+    fn read_model_file_returns_name_and_bytes() {
+        let path = unique_temp_path("small.glb");
+        let content = b"glTF\x02\x00\x00\x00test-bytes".to_vec();
+        std::fs::write(&path, &content).expect("create temp model file");
+        let result = read_model_file(path_string(&path));
+        let _ = std::fs::remove_file(&path);
+        let model = match result {
+            Ok(model) => model,
+            Err(error) => panic!("expected success, got {error}"),
+        };
+        let expected_name = path.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(model.name, expected_name);
+        assert!(model.name.ends_with("small.glb"));
+        assert_eq!(model.bytes, content);
+    }
+
+    #[test]
+    fn read_model_file_errors_for_missing_file() {
+        let path = unique_temp_path("missing.vrm");
+        assert!(!path.exists());
+        assert!(read_model_file(path_string(&path)).is_err());
+    }
+
+    #[test]
+    fn write_export_file_rejects_non_export_paths() {
+        for name in ["out.glb", "out.exe", "out.vrm.exe"] {
+            let path = unique_temp_path(name);
+            let result = write_export_file(path_string(&path), vec![1, 2, 3]);
+            assert_eq!(
+                result,
+                Err("Exports must be saved as .vrm or .png.".to_string()),
+                "for {name}"
+            );
+            assert!(!path.exists());
+        }
+    }
+
+    #[test]
+    fn write_export_file_rejects_empty_bytes() {
+        let path = unique_temp_path("empty.png");
+        let result = write_export_file(path_string(&path), Vec::new());
+        assert_eq!(result, Err("Refusing to write an empty export.".to_string()));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn write_export_file_creates_nested_dirs_and_writes_bytes() {
+        let root = unique_temp_path("export-dir");
+        let path = root.join("nested").join("deeper").join("out.vrm");
+        assert!(!root.exists());
+        let content = vec![0u8, 1, 2, 3, 254, 255];
+        let result = write_export_file(path_string(&path), content.clone());
+        let written = std::fs::read(&path);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(result, Ok(()));
+        assert_eq!(written.expect("read back export"), content);
+        assert!(!root.exists());
+    }
+}
