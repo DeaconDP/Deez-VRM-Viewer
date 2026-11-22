@@ -6,6 +6,7 @@ import { createVRMAnimationClip, VRMAnimationLoaderPlugin, type VRMAnimation } f
 import type { AnimationLoopMode, AnimationState, ModelSummary } from '../types';
 import { DuplicateBoneSync } from './duplicateBoneSync';
 import { createFpsMeter } from './fpsMeter';
+import { SelectionHighlight, type SelectionRef } from './selectionHighlight';
 import { retargetQuaterniusClip, type QuaterniusAnimationId, type QuaterniusLibraryId } from './quaterniusAnimations';
 
 export type BuiltInAnimationId = QuaterniusAnimationId;
@@ -44,6 +45,7 @@ export class ViewerController {
   private fpsMeter = createFpsMeter();
   private fpsListener: ((fps: number | null) => void) | null = null;
   private loadRequest = 0;
+  private highlight = new SelectionHighlight();
   private quaterniusLoads = new Map<QuaterniusLibraryId, Promise<{ scene: THREE.Group; animations: THREE.AnimationClip[] }>>();
 
   constructor(private canvas: HTMLCanvasElement) {
@@ -68,6 +70,7 @@ export class ViewerController {
     this.scene.add(this.keyLight);
     this.rimLight.position.set(-4, 3, -4);
     this.scene.add(this.rimLight);
+    this.scene.add(this.highlight.group);
     this.resizeObserver = new ResizeObserver(this.resize);
     this.resizeObserver.observe(canvas.parentElement!);
     this.resize();
@@ -114,6 +117,7 @@ export class ViewerController {
     this.vrm?.update(delta);
     if (this.turntable && this.model) this.model.rotation.y += delta * 0.35;
     this.controls.update();
+    this.highlight.update();
     this.renderer.render(this.scene, this.camera);
     const now = performance.now();
     this.fpsMeter.frame(now);
@@ -122,7 +126,7 @@ export class ViewerController {
     this.raf = requestAnimationFrame(this.tick);
   };
 
-  render = () => this.renderer.render(this.scene, this.camera);
+  render = () => { this.highlight.update(); this.renderer.render(this.scene, this.camera); };
   private startLoop() { if (!this.animate) { this.animate = true; this.fpsMeter.reset(); this.clock.start(); this.tick(); } }
   private stopLoop() {
     if (this.turntable || this.animationState.playing) return;
@@ -190,6 +194,7 @@ export class ViewerController {
   cancelLoad() { this.loadRequest++; }
 
   unload() {
+    this.highlight.clear();
     this.clearAnimation();
     this.stopLoop();
     if (!this.model) return;
@@ -209,7 +214,25 @@ export class ViewerController {
 
   frameAll() {
     if (!this.model) { this.camera.position.set(0, 1.35, 3.2); this.controls.target.set(0, 1.15, 0); this.controls.update(); return; }
-    const box = new THREE.Box3().setFromObject(this.model), size = box.getSize(new THREE.Vector3()), center = box.getCenter(new THREE.Vector3());
+    this.frameBox(new THREE.Box3().setFromObject(this.model));
+  }
+
+  /** Highlights the explorer item in the viewport. Returns how many objects are highlighted (0 for expressions, unknown ids or no model). */
+  setSelection(item: SelectionRef | null) {
+    if (this.highlight.matches(this.model, item)) return this.highlight.count;
+    const count = this.highlight.set(this.model, item);
+    this.render();
+    return count;
+  }
+
+  /** Fits the camera to the highlighted selection, or the whole model when nothing is highlighted. */
+  frameSelection() {
+    const box = this.highlight.bounds();
+    box ? this.frameBox(box) : this.frameAll();
+  }
+
+  private frameBox(box: THREE.Box3) {
+    const size = box.getSize(new THREE.Vector3()), center = box.getCenter(new THREE.Vector3());
     const distance = Math.max(size.x, size.y, size.z) / (2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2))) * 1.25;
     this.controls.target.copy(center); this.camera.position.set(center.x, center.y + size.y * 0.04, center.z + distance); this.controls.update(); this.render();
   }
@@ -414,10 +437,13 @@ export class ViewerController {
   capture(transparent = false, scale = 1) {
     const old = this.scene.background, size = this.renderer.getSize(new THREE.Vector2()), ratio = this.renderer.getPixelRatio();
     if (transparent) this.scene.background = null;
-    this.renderer.setPixelRatio(ratio * scale); this.renderer.setSize(size.x, size.y, false); this.render();
-    const data = this.canvas.toDataURL('image/png');
-    this.scene.background = old; this.renderer.setPixelRatio(ratio); this.renderer.setSize(size.x, size.y, false); this.render();
-    return data;
+    this.highlight.group.visible = false;
+    try {
+      this.renderer.setPixelRatio(ratio * scale); this.renderer.setSize(size.x, size.y, false); this.render();
+      return this.canvas.toDataURL('image/png');
+    } finally {
+      this.scene.background = old; this.highlight.group.visible = true; this.renderer.setPixelRatio(ratio); this.renderer.setSize(size.x, size.y, false); this.render();
+    }
   }
-  dispose() { this.unload(); this.backgroundRequest++; this.backgroundTexture?.dispose(); this.resizeObserver.disconnect(); this.controls.dispose(); this.renderer.dispose(); cancelAnimationFrame(this.raf); }
+  dispose() { this.unload(); this.highlight.dispose(); this.backgroundRequest++; this.backgroundTexture?.dispose(); this.resizeObserver.disconnect(); this.controls.dispose(); this.renderer.dispose(); cancelAnimationFrame(this.raf); }
 }

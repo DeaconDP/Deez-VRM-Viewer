@@ -77,7 +77,9 @@ function EmptyState({ onOpen, onUrl, onFreebie }: { onOpen: () => void; onUrl: (
   </div>;
 }
 
-function Explorer({ model, filter, setFilter, selected, setSelected }: { model: ModelSummary | null; filter: string; setFilter: (v: string) => void; selected: TreeItem | null; setSelected: (v: TreeItem) => void }) {
+const FRAMEABLE_KINDS: TreeItem['kind'][] = ['mesh', 'bone', 'node', 'material'];
+
+function Explorer({ model, filter, setFilter, selected, setSelected, onFrame }: { model: ModelSummary | null; filter: string; setFilter: (v: string) => void; selected: TreeItem | null; setSelected: (v: TreeItem | null) => void; onFrame: (v: TreeItem) => void }) {
   const groups = useMemo(() => {
     if (!model) return [];
     const itemGroups = [
@@ -100,7 +102,7 @@ function Explorer({ model, filter, setFilter, selected, setSelected }: { model: 
       {!model && <p class="muted tree-empty">Open a model to inspect its contents.</p>}
       {groups.map(([name, items]) => <details open={!!openGroups[name]} onToggle={e => { const open = e.currentTarget.open; setOpenGroups(old => !!old[name] === open ? old : { ...old, [name]: open }); }} key={name}>
         <summary><span>{name}</span><b>{items.length}</b></summary>
-        {items.slice(0, 250).map(item => <button role="treeitem" class={selected?.id === item.id ? 'selected' : ''} onClick={() => setSelected(item)} key={item.id}>
+        {items.slice(0, 250).map(item => <button role="treeitem" aria-selected={selected?.id === item.id} data-item-id={item.id} data-item-kind={item.kind} class={selected?.id === item.id ? 'selected' : ''} onClick={e => { if (e.detail < 2) setSelected(selected?.id === item.id ? null : item); }} onDblClick={() => FRAMEABLE_KINDS.includes(item.kind) && onFrame(item)} title={FRAMEABLE_KINDS.includes(item.kind) ? 'Click to select, double-click to frame' : undefined} key={item.id}>
           <span class={`item-dot ${item.kind}`} /> <span>{item.label}</span>{item.detail && <small>{item.detail}</small>}
         </button>)}
       </details>)}
@@ -108,12 +110,12 @@ function Explorer({ model, filter, setFilter, selected, setSelected }: { model: 
   </div>;
 }
 
-function Inspector({ model, selected, expressionValues, onExpression, onReset }: { model: ModelSummary | null; selected: TreeItem | null; expressionValues: Record<string, number>; onExpression: (name: string, value: number) => void; onReset: () => void }) {
+function Inspector({ model, selected, expressionValues, onExpression, onReset, onFrameSelection }: { model: ModelSummary | null; selected: TreeItem | null; expressionValues: Record<string, number>; onExpression: (name: string, value: number) => void; onReset: () => void; onFrameSelection: () => void }) {
   const isExpression = selected?.id.startsWith('expression-');
   return <div class="panel-content inspector">
     <div class="panel-heading"><div><span class="eyebrow">SELECTION</span><h2>Inspector</h2></div><Settings /></div>
     {!model ? <div class="inspector-empty"><Aperture /><p>Nothing selected</p><span>Model properties will appear here.</span></div> : <>
-      <div class="selection-card"><span class={`item-dot ${selected?.kind ?? 'system'}`} /><div><b>{selected?.label ?? model.name}</b><small>{selected?.kind ?? `${model.format} root`}</small></div></div>
+      <div class="selection-card"><span class={`item-dot ${selected?.kind ?? 'system'}`} /><div><b>{selected?.label ?? model.name}</b><small>{selected?.kind ?? `${model.format} root`}</small></div>{selected && FRAMEABLE_KINDS.includes(selected.kind) && <button class="secondary frame-selection" onClick={onFrameSelection} aria-label="Frame selection" title="Fit the camera to the selection"><Maximize /> Frame selection</button>}</div>
       {isExpression && selected && <Accordion title="Expression Preview" open>
         <label class="slider-label"><span>Weight</span><output>{Math.round((expressionValues[selected.label] ?? 0) * 100)}%</output></label>
         <input type="range" min="0" max="1" step="0.01" value={expressionValues[selected.label] ?? 0} onInput={e => onExpression(selected.label, Number(e.currentTarget.value))} />
@@ -275,6 +277,12 @@ function App() {
   const [animationSpeed, setAnimationSpeed] = useState(1), [animationLoop, setAnimationLoop] = useState<AnimationLoopMode>('repeat'), [inPlace, setInPlace] = useState(true);
   const [legalAccepted, setLegalAccepted] = useState(hasAcceptedLegal), [legalView, setLegalView] = useState<LegalView>('about'), [legalOpen, setLegalOpen] = useState(false);
   const [viewerReady, setViewerReady] = useState(false), [fps, setFps] = useState<number | null>(null);
+  const [highlight, setHighlight] = useState<{ kind: string; count: number }>({ kind: '', count: 0 });
+  useEffect(() => {
+    const count = controller.current?.setSelection(selected) ?? 0;
+    setHighlight({ kind: count && selected ? selected.kind : '', count });
+  }, [selected, model, viewerReady]);
+  const frameItem = (item: TreeItem) => { setSelected(item); controller.current?.setSelection(item); controller.current?.frameSelection(); };
 
   useEffect(() => {
     let live = true;
@@ -494,7 +502,7 @@ function App() {
     }
   };
 
-  useEffect(() => { const keys = (e: KeyboardEvent) => { if ((e.target as HTMLElement).matches('input,textarea')) return; if (e.key.toLowerCase() === 'g') setGrid(controller.current?.toggleGrid() ?? false); if (e.key === 'Home' || e.key.toLowerCase() === 'f') controller.current?.frameAll(); if (e.key === 'Escape') { setUrlOpen(false); setCaptureOpen(false); } }; addEventListener('keydown', keys); return () => removeEventListener('keydown', keys); }, []);
+  useEffect(() => { const keys = (e: KeyboardEvent) => { if ((e.target as HTMLElement).matches('input,textarea')) return; if (e.key.toLowerCase() === 'g') setGrid(controller.current?.toggleGrid() ?? false); if (e.key === 'Home' || e.key.toLowerCase() === 'f') controller.current?.frameAll(); if (e.key === 'Escape') { setUrlOpen(false); setCaptureOpen(false); setSelected(null); } }; addEventListener('keydown', keys); return () => removeEventListener('keydown', keys); }, []);
 
   return <main class={`app ${!leftOpen ? 'left-closed' : ''} ${!rightOpen ? 'right-closed' : ''}`} onDragOver={e => e.preventDefault()} onDrop={onDrop}>
     <header class="toolbar">
@@ -515,8 +523,8 @@ function App() {
       <input ref={animationInput} hidden type="file" accept=".vrma" onChange={e => { const file = e.currentTarget.files?.[0]; if (file) void openAnimation(file); e.currentTarget.value = ''; }} />
       <input ref={backgroundInput} hidden type="file" accept="image/*" onChange={e => { const file = e.currentTarget.files?.[0]; if (file) openBackground(file); e.currentTarget.value = ''; }} />
     </header>
-    <aside class="left-panel"><Explorer model={model} filter={filter} setFilter={setFilter} selected={selected} setSelected={setSelected} /></aside>
-    <section class="viewport">
+    <aside class="left-panel"><Explorer model={model} filter={filter} setFilter={setFilter} selected={selected} setSelected={setSelected} onFrame={frameItem} /></aside>
+    <section class="viewport" data-selection-kind={highlight.kind} data-selection-count={highlight.count}>
       <canvas ref={canvasRef} aria-label={model ? `3D view of ${model.name}` : 'Empty 3D model viewport'} />
       {state === 'idle' && <EmptyState onOpen={() => fileInput.current?.click()} onUrl={() => setUrlOpen(true)} onFreebie={() => void loadFreebie()} />}
       {state === 'parsing' && <div class="loading"><div class="spinner" /><b>Opening {fileName}</b><span>{progress ? `${Math.round(progress * 100)}%` : 'Reading model…'}</span><div class="progress"><i style={{ width: `${Math.max(8, progress * 100)}%` }} /></div></div>}
@@ -525,7 +533,7 @@ function App() {
       <button class="panel-toggle right-toggle" onClick={() => setRightOpen(!rightOpen)} aria-label="Toggle inspector"><PanelRightClose /></button>
       {model && <div class="viewport-badge"><span class="status-dot" />{model.format} {model.version}</div>}
     </section>
-    <aside class="right-panel"><div class="panel-tabs"><button class={rightTab === 'inspector' ? 'active' : ''} onClick={() => setRightTab('inspector')}>Inspector</button><button class={rightTab === 'scene' ? 'active' : ''} onClick={() => setRightTab('scene')}>Scene</button><button class={rightTab === 'animation' ? 'active' : ''} onClick={() => setRightTab('animation')}>Animation <small>(beta)</small></button><button class={rightTab === 'bake' ? 'active' : ''} onClick={() => setRightTab('bake')}>Bake <small>(beta)</small></button></div>{rightTab === 'inspector' ? <Inspector model={model} selected={selected} expressionValues={expressionValues} onExpression={expression} onReset={resetExpressions} /> : rightTab === 'scene' ? <ScenePanel settings={sceneSettings} error={sceneError} onChange={changeScene} onFile={() => backgroundInput.current?.click()} onUrl={openBackgroundUrl} onReset={resetScene} /> : rightTab === 'animation' ? <AnimationPanel model={model} animation={animation} speed={animationSpeed} loop={animationLoop} inPlace={inPlace} onPreset={choosePreset} onImport={() => animationInput.current?.click()} onPlayPause={playPause} onStop={() => controller.current?.stopAnimation()} onSeek={time => controller.current?.seekAnimation(time)} onSpeed={changeSpeed} onLoop={changeLoop} onInPlace={changeInPlace} onResetPose={() => controller.current?.stopAnimation(true)} /> : <BakePanel model={model} source={sourceFile} bake={bake} mergeMeshes={mergeMeshes} onMergeMeshes={setMergeMeshes} onBake={() => void startBake()} onCancel={() => cancelBake(true)} />}</aside>
+    <aside class="right-panel"><div class="panel-tabs"><button class={rightTab === 'inspector' ? 'active' : ''} onClick={() => setRightTab('inspector')}>Inspector</button><button class={rightTab === 'scene' ? 'active' : ''} onClick={() => setRightTab('scene')}>Scene</button><button class={rightTab === 'animation' ? 'active' : ''} onClick={() => setRightTab('animation')}>Animation <small>(beta)</small></button><button class={rightTab === 'bake' ? 'active' : ''} onClick={() => setRightTab('bake')}>Bake <small>(beta)</small></button></div>{rightTab === 'inspector' ? <Inspector model={model} selected={selected} expressionValues={expressionValues} onExpression={expression} onReset={resetExpressions} onFrameSelection={() => controller.current?.frameSelection()} /> : rightTab === 'scene' ? <ScenePanel settings={sceneSettings} error={sceneError} onChange={changeScene} onFile={() => backgroundInput.current?.click()} onUrl={openBackgroundUrl} onReset={resetScene} /> : rightTab === 'animation' ? <AnimationPanel model={model} animation={animation} speed={animationSpeed} loop={animationLoop} inPlace={inPlace} onPreset={choosePreset} onImport={() => animationInput.current?.click()} onPlayPause={playPause} onStop={() => controller.current?.stopAnimation()} onSeek={time => controller.current?.seekAnimation(time)} onSpeed={changeSpeed} onLoop={changeLoop} onInPlace={changeInPlace} onResetPose={() => controller.current?.stopAnimation(true)} /> : <BakePanel model={model} source={sourceFile} bake={bake} mergeMeshes={mergeMeshes} onMergeMeshes={setMergeMeshes} onBake={() => void startBake()} onCancel={() => cancelBake(true)} />}</aside>
     <footer class="statusbar">
       <span class="status-summary"><span class={`status-dot ${state}`} />{state === 'ready' ? 'Ready' : state === 'idle' ? 'Waiting for model' : state}</span>
       <span class="footer-credit"><button onClick={() => showLegal('terms')}>Terms</button><i>·</i><button onClick={() => showLegal('privacy')}>Privacy</button><i>·</i><button onClick={() => showLegal('licences')}>Licences</button><i>·</i><a href="https://github.com/ToxSam/open-source-avatars" target="_blank" rel="noreferrer">Free VRMs by ToxSam</a><i>·</i><a href="https://quaternius.com/packs/universalanimationlibrary2.html" target="_blank" rel="noreferrer">Animations by Quaternius</a><i>·</i><span>built for <a href="https://vrm.dev/" target="_blank" rel="noreferrer">VRM</a> by <a href="https://deac.online/" target="_blank" rel="noreferrer">deac.online</a> at <a href="https://worldbuild.io/" target="_blank" rel="noreferrer">worldbuild.io</a> with codex</span></span>
