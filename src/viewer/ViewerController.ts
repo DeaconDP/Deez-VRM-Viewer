@@ -3,10 +3,13 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils, type VRM } from '@pixiv/three-vrm';
 import { createVRMAnimationClip, VRMAnimationLoaderPlugin, type VRMAnimation } from '@pixiv/three-vrm-animation';
-import type { AnimationLoopMode, AnimationState, ModelSummary } from '../types';
+import type { AnimationLoopMode, AnimationState, MaterialDetails, ModelSummary } from '../types';
 import { DuplicateBoneSync } from './duplicateBoneSync';
 import { createFpsMeter } from './fpsMeter';
 import { SelectionHighlight, type SelectionRef } from './selectionHighlight';
+import { describeVrmMeta, type VRM0MetaLike, type VRM1MetaLike } from './vrmMeta';
+import { describeMaterialInfo, listTextureSlots } from './materialInfo';
+import { textureThumbnail } from './textureThumbnail';
 import { retargetQuaterniusClip, type QuaterniusAnimationId, type QuaterniusLibraryId } from './quaterniusAnimations';
 
 export type BuiltInAnimationId = QuaterniusAnimationId;
@@ -181,11 +184,13 @@ export class ViewerController {
     const expressionManager = this.vrm?.expressionManager;
     const expressions = expressionManager?.expressions.map(e => e.expressionName) ?? [];
     const version = this.vrm ? ((gltf.userData.vrmMeta?.metaVersion as string | undefined) ?? (meta as any)?.metaVersion ?? '1.0') : '2.0';
+    this.metaVersion = meta?.metaVersion;
     return {
       name: normalMeta?.name || normalMeta?.title || fileName.replace(/\.(vrm|glb|gltf)$/i, ''), format: this.vrm ? 'VRM' : 'glTF', version,
       generator: gltf.parser.json.asset?.generator ?? 'Not specified', size, loadMs: performance.now() - started,
       nodes, meshes, triangles: Math.round(triangles), materials: materials.size, textures: textures.size, bones, expressions,
-      authors: normalMeta?.authors ?? (normalMeta?.author ? [normalMeta.author] : []), license: normalMeta?.licenseUrl ?? normalMeta?.otherLicenseUrl ?? 'Not specified', items,
+      authors: normalMeta?.authors ?? (normalMeta?.author ? [normalMeta.author] : []), license: normalMeta?.licenseUrl ?? normalMeta?.otherLicenseUrl ?? 'Not specified',
+      licence: describeVrmMeta(meta as VRM1MetaLike | VRM0MetaLike | undefined), items,
       unsyncedDetachedSkeletons: this.duplicateBoneSync?.unsyncedDetachedSkeletons || undefined
     };
   }
@@ -193,8 +198,34 @@ export class ViewerController {
   /** Abandons any in-flight load; its result is disposed instead of being added to the scene. */
   cancelLoad() { this.loadRequest++; }
 
+  private metaVersion: string | undefined;
+  private thumbnails = new Map<string, string | null>();
+
+  /** Read-only description of a loaded material (by uuid) with small texture thumbnails, or null when not found. */
+  describeMaterial(uuid: string): MaterialDetails | null {
+    if (!this.model) return null;
+    const users: THREE.Material[] = [];
+    this.model.traverse(object => {
+      const mesh = object as THREE.Mesh;
+      const found = mesh.isMesh && (Array.isArray(mesh.material) ? mesh.material : [mesh.material]).find(m => m?.uuid === uuid);
+      if (found) users.push(found);
+    });
+    const material = users[0], meshCount = users.length;
+    if (!material) return null;
+    const details = describeMaterialInfo(material, meshCount, this.metaVersion);
+    const textures = new Map(listTextureSlots(material));
+    for (const entry of details.textures) {
+      const texture = textures.get(entry.slot);
+      if (!texture) continue;
+      if (!this.thumbnails.has(texture.uuid)) this.thumbnails.set(texture.uuid, textureThumbnail(texture));
+      entry.thumbnail = this.thumbnails.get(texture.uuid) ?? undefined;
+    }
+    return details;
+  }
+
   unload() {
     this.highlight.clear();
+    this.thumbnails.clear();
     this.clearAnimation();
     this.stopLoop();
     if (!this.model) return;

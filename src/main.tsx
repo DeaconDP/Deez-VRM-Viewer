@@ -6,7 +6,7 @@ import {
   Image, Pause, Play, RefreshCw, Rotate3D, Search, Settings, ShieldCheck, SkipBack, Sparkles, Square, Sun, Undo2, Upload, X
 } from 'lucide-preact';
 import type { ComponentChildren } from 'preact';
-import type { AnimationLoopMode, AnimationState, LoadState, ModelSummary, TreeItem } from './types';
+import type { AnimationLoopMode, AnimationState, LicenceInfo, LoadState, MaterialDetails, MetaValue, ModelSummary, TreeItem } from './types';
 import { BAKE_LIMITS, type BakeStage, type BakeStats, type BakeWorkerResponse } from './bake/types';
 import { validateModelFile } from './platform/files';
 import { installDesktopBridge } from './platform/desktopBridge';
@@ -17,6 +17,7 @@ import privacyUrl from '../PRIVACY.md?url';
 import licenseUrl from '../LICENSE?url';
 import noticesUrl from '../THIRD_PARTY_NOTICES.md?url';
 import './styles.css';
+import './inspector.css';
 
 installDesktopBridge();
 
@@ -110,7 +111,39 @@ function Explorer({ model, filter, setFilter, selected, setSelected, onFrame }: 
   </div>;
 }
 
-function Inspector({ model, selected, expressionValues, onExpression, onReset, onFrameSelection }: { model: ModelSummary | null; selected: TreeItem | null; expressionValues: Record<string, number>; onExpression: (name: string, value: number) => void; onReset: () => void; onFrameSelection: () => void }) {
+const metaValue = (value: MetaValue) => value.href ? <a href={value.href} target="_blank" rel="noreferrer">{value.text}</a> : value.text;
+
+function LicenceDetails({ licence }: { licence: LicenceInfo }) {
+  return <div class="licence-details" data-licence-version={licence.metaVersion}>
+    {licence.groups.filter(group => group.rows.length).map(group => <section class="meta-group" data-meta-group={group.id} key={group.id}>
+      <h3>{group.title}</h3>
+      <dl>{group.rows.map(row => <div class="meta-row" data-meta-row={row.key} key={row.key}><dt>{row.label}</dt><dd class="wrap">{row.values.map((value, n) => <span key={n}>{metaValue(value)}</span>)}</dd></div>)}</dl>
+    </section>)}
+  </div>;
+}
+
+function MaterialPanel({ details }: { details: MaterialDetails }) {
+  const swatch = (color: string) => <><span class="color-swatch" style={{ background: color }} />{color}</>;
+  return <div class="material-details" data-material-shader={details.shader} data-material-alpha={details.alphaMode}>
+    <dl>
+      <dt>Name</dt><dd>{details.name}</dd>
+      <dt>Shader</dt><dd title={details.type}>{details.shaderLabel}</dd>
+      <dt>Alpha mode</dt><dd>{details.alphaMode}{details.alphaCutoff !== undefined && ` (cutoff ${details.alphaCutoff})`}</dd>
+      <dt>Double-sided</dt><dd>{details.doubleSided ? 'Yes' : 'No'}</dd>
+      {details.baseColor && <><dt>Base colour</dt><dd class="color-value">{swatch(details.baseColor)}</dd></>}
+      {details.shadeColor && <><dt>Shade colour</dt><dd class="color-value">{swatch(details.shadeColor)}</dd></>}
+      {details.outlineWidthMode && <><dt>Outline</dt><dd>{details.outlineWidthMode}{details.outlineWidthFactor !== undefined && ` · ${details.outlineWidthFactor}`}</dd></>}
+      <dt>Used by</dt><dd>{details.meshCount} mesh{details.meshCount === 1 ? '' : 'es'}</dd>
+    </dl>
+    <h3>Textures <small>{details.textures.length}</small></h3>
+    {details.textures.length ? <ul class="texture-list">{details.textures.map(texture => <li data-texture-slot={texture.slot} key={texture.slot}>
+      {texture.thumbnail ? <img src={texture.thumbnail} alt={`${texture.slot} thumbnail`} width={48} height={48} /> : <span class="texture-placeholder" />}
+      <span><b>{texture.slot}</b><small>{texture.width && texture.height ? `${texture.width}×${texture.height}` : 'Unknown size'}{texture.name && ` · ${texture.name}`}</small></span>
+    </li>)}</ul> : <p class="muted">No textures.</p>}
+  </div>;
+}
+
+function Inspector({ model, selected, materialDetails, expressionValues, onExpression, onReset, onFrameSelection }: { model: ModelSummary | null; selected: TreeItem | null; materialDetails: MaterialDetails | null; expressionValues: Record<string, number>; onExpression: (name: string, value: number) => void; onReset: () => void; onFrameSelection: () => void }) {
   const isExpression = selected?.id.startsWith('expression-');
   return <div class="panel-content inspector">
     <div class="panel-heading"><div><span class="eyebrow">SELECTION</span><h2>Inspector</h2></div><Settings /></div>
@@ -124,9 +157,11 @@ function Inspector({ model, selected, expressionValues, onExpression, onReset, o
       <Accordion title="General" open>
         <dl><dt>Type</dt><dd>{selected?.kind ?? model.format}</dd><dt>Name</dt><dd>{selected?.label ?? model.name}</dd>{selected?.detail && <><dt>Detail</dt><dd>{selected.detail}</dd></>}</dl>
       </Accordion>
+      {materialDetails && <Accordion title="Material" open><MaterialPanel details={materialDetails} /></Accordion>}
       <Accordion title="VRM Metadata" open={!selected}>
         <dl><dt>Format</dt><dd>{model.format} {model.version}</dd><dt>Author</dt><dd>{model.authors.join(', ') || 'Not specified'}</dd><dt>Generator</dt><dd>{model.generator}</dd><dt>Licence</dt><dd class="wrap">{model.license}</dd></dl>
       </Accordion>
+      {model.licence && <Accordion title="Licence & permissions" open={!selected}><LicenceDetails licence={model.licence} /></Accordion>}
       <Accordion title="Diagnostics">
         <dl><dt>File size</dt><dd>{formatBytes(model.size)}</dd><dt>Load time</dt><dd>{model.loadMs.toFixed(0)} ms</dd><dt>Nodes</dt><dd>{model.nodes}</dd><dt>Meshes</dt><dd>{model.meshes}</dd><dt>Triangles</dt><dd>{model.triangles.toLocaleString()}</dd><dt>Materials</dt><dd>{model.materials}</dd><dt>Textures</dt><dd>{model.textures}</dd><dt>Bones</dt><dd>{model.bones}</dd></dl>
       </Accordion>
@@ -282,6 +317,7 @@ function App() {
     const count = controller.current?.setSelection(selected) ?? 0;
     setHighlight({ kind: count && selected ? selected.kind : '', count });
   }, [selected, model, viewerReady]);
+  const materialDetails = useMemo(() => selected?.kind === 'material' && model ? controller.current?.describeMaterial(selected.id) ?? null : null, [selected, model]);
   const frameItem = (item: TreeItem) => { setSelected(item); controller.current?.setSelection(item); controller.current?.frameSelection(); };
 
   useEffect(() => {
@@ -533,7 +569,7 @@ function App() {
       <button class="panel-toggle right-toggle" onClick={() => setRightOpen(!rightOpen)} aria-label="Toggle inspector"><PanelRightClose /></button>
       {model && <div class="viewport-badge"><span class="status-dot" />{model.format} {model.version}</div>}
     </section>
-    <aside class="right-panel"><div class="panel-tabs"><button class={rightTab === 'inspector' ? 'active' : ''} onClick={() => setRightTab('inspector')}>Inspector</button><button class={rightTab === 'scene' ? 'active' : ''} onClick={() => setRightTab('scene')}>Scene</button><button class={rightTab === 'animation' ? 'active' : ''} onClick={() => setRightTab('animation')}>Animation <small>(beta)</small></button><button class={rightTab === 'bake' ? 'active' : ''} onClick={() => setRightTab('bake')}>Bake <small>(beta)</small></button></div>{rightTab === 'inspector' ? <Inspector model={model} selected={selected} expressionValues={expressionValues} onExpression={expression} onReset={resetExpressions} onFrameSelection={() => controller.current?.frameSelection()} /> : rightTab === 'scene' ? <ScenePanel settings={sceneSettings} error={sceneError} onChange={changeScene} onFile={() => backgroundInput.current?.click()} onUrl={openBackgroundUrl} onReset={resetScene} /> : rightTab === 'animation' ? <AnimationPanel model={model} animation={animation} speed={animationSpeed} loop={animationLoop} inPlace={inPlace} onPreset={choosePreset} onImport={() => animationInput.current?.click()} onPlayPause={playPause} onStop={() => controller.current?.stopAnimation()} onSeek={time => controller.current?.seekAnimation(time)} onSpeed={changeSpeed} onLoop={changeLoop} onInPlace={changeInPlace} onResetPose={() => controller.current?.stopAnimation(true)} /> : <BakePanel model={model} source={sourceFile} bake={bake} mergeMeshes={mergeMeshes} onMergeMeshes={setMergeMeshes} onBake={() => void startBake()} onCancel={() => cancelBake(true)} />}</aside>
+    <aside class="right-panel"><div class="panel-tabs"><button class={rightTab === 'inspector' ? 'active' : ''} onClick={() => setRightTab('inspector')}>Inspector</button><button class={rightTab === 'scene' ? 'active' : ''} onClick={() => setRightTab('scene')}>Scene</button><button class={rightTab === 'animation' ? 'active' : ''} onClick={() => setRightTab('animation')}>Animation <small>(beta)</small></button><button class={rightTab === 'bake' ? 'active' : ''} onClick={() => setRightTab('bake')}>Bake <small>(beta)</small></button></div>{rightTab === 'inspector' ? <Inspector model={model} selected={selected} materialDetails={materialDetails} expressionValues={expressionValues} onExpression={expression} onReset={resetExpressions} onFrameSelection={() => controller.current?.frameSelection()} /> : rightTab === 'scene' ? <ScenePanel settings={sceneSettings} error={sceneError} onChange={changeScene} onFile={() => backgroundInput.current?.click()} onUrl={openBackgroundUrl} onReset={resetScene} /> : rightTab === 'animation' ? <AnimationPanel model={model} animation={animation} speed={animationSpeed} loop={animationLoop} inPlace={inPlace} onPreset={choosePreset} onImport={() => animationInput.current?.click()} onPlayPause={playPause} onStop={() => controller.current?.stopAnimation()} onSeek={time => controller.current?.seekAnimation(time)} onSpeed={changeSpeed} onLoop={changeLoop} onInPlace={changeInPlace} onResetPose={() => controller.current?.stopAnimation(true)} /> : <BakePanel model={model} source={sourceFile} bake={bake} mergeMeshes={mergeMeshes} onMergeMeshes={setMergeMeshes} onBake={() => void startBake()} onCancel={() => cancelBake(true)} />}</aside>
     <footer class="statusbar">
       <span class="status-summary"><span class={`status-dot ${state}`} />{state === 'ready' ? 'Ready' : state === 'idle' ? 'Waiting for model' : state}</span>
       <span class="footer-credit"><button onClick={() => showLegal('terms')}>Terms</button><i>·</i><button onClick={() => showLegal('privacy')}>Privacy</button><i>·</i><button onClick={() => showLegal('licences')}>Licences</button><i>·</i><a href="https://github.com/ToxSam/open-source-avatars" target="_blank" rel="noreferrer">Free VRMs by ToxSam</a><i>·</i><a href="https://quaternius.com/packs/universalanimationlibrary2.html" target="_blank" rel="noreferrer">Animations by Quaternius</a><i>·</i><span>built for <a href="https://vrm.dev/" target="_blank" rel="noreferrer">VRM</a> by <a href="https://deac.online/" target="_blank" rel="noreferrer">deac.online</a> at <a href="https://worldbuild.io/" target="_blank" rel="noreferrer">worldbuild.io</a> with codex</span></span>
