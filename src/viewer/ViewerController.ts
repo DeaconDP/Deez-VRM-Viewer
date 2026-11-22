@@ -3,10 +3,14 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils, type VRM } from '@pixiv/three-vrm';
 import { createVRMAnimationClip, VRMAnimationLoaderPlugin, type VRMAnimation } from '@pixiv/three-vrm-animation';
-import type { AnimationLoopMode, AnimationState, ModelSummary } from '../types';
+import type { AnimationLoopMode, AnimationState, MaterialDetails, ModelSummary } from '../types';
 import { DuplicateBoneSync } from './duplicateBoneSync';
 import { createFpsMeter } from './fpsMeter';
 import { SelectionHighlight, type SelectionRef } from './selectionHighlight';
+import { describeVrmMeta, type VRM0MetaLike, type VRM1MetaLike } from './vrmMeta';
+import { describeMaterialInfo, listTextureSlots } from './materialInfo';
+import { textureThumbnail } from './textureThumbnail';
+import { SpringBoneOverlay, countSpringBones } from './springBoneOverlay';
 import { retargetQuaterniusClip, type QuaterniusAnimationId, type QuaterniusLibraryId } from './quaterniusAnimations';
 
 export type BuiltInAnimationId = QuaterniusAnimationId;
@@ -46,6 +50,8 @@ export class ViewerController {
   private fpsListener: ((fps: number | null) => void) | null = null;
   private loadRequest = 0;
   private highlight = new SelectionHighlight();
+  private springs = new SpringBoneOverlay();
+  private springsVisible = false;
   private quaterniusLoads = new Map<QuaterniusLibraryId, Promise<{ scene: THREE.Group; animations: THREE.AnimationClip[] }>>();
 
   constructor(private canvas: HTMLCanvasElement) {
@@ -71,6 +77,8 @@ export class ViewerController {
     this.rimLight.position.set(-4, 3, -4);
     this.scene.add(this.rimLight);
     this.scene.add(this.highlight.group);
+    this.springs.group.visible = false;
+    this.scene.add(this.springs.group);
     this.resizeObserver = new ResizeObserver(this.resize);
     this.resizeObserver.observe(canvas.parentElement!);
     this.resize();
@@ -117,6 +125,7 @@ export class ViewerController {
     this.vrm?.update(delta);
     if (this.turntable && this.model) this.model.rotation.y += delta * 0.35;
     this.controls.update();
+    this.syncSprings();
     this.highlight.update();
     this.renderer.render(this.scene, this.camera);
     const now = performance.now();
@@ -126,7 +135,7 @@ export class ViewerController {
     this.raf = requestAnimationFrame(this.tick);
   };
 
-  render = () => { this.highlight.update(); this.renderer.render(this.scene, this.camera); };
+  render = () => { this.syncSprings(); this.highlight.update(); this.renderer.render(this.scene, this.camera); };
   private startLoop() { if (!this.animate) { this.animate = true; this.fpsMeter.reset(); this.clock.start(); this.tick(); } }
   private stopLoop() {
     if (this.turntable || this.animationState.playing) return;
@@ -181,11 +190,13 @@ export class ViewerController {
     const expressionManager = this.vrm?.expressionManager;
     const expressions = expressionManager?.expressions.map(e => e.expressionName) ?? [];
     const version = this.vrm ? ((gltf.userData.vrmMeta?.metaVersion as string | undefined) ?? (meta as any)?.metaVersion ?? '1.0') : '2.0';
+    this.metaVersion = meta?.metaVersion;
     return {
       name: normalMeta?.name || normalMeta?.title || fileName.replace(/\.(vrm|glb|gltf)$/i, ''), format: this.vrm ? 'VRM' : 'glTF', version,
       generator: gltf.parser.json.asset?.generator ?? 'Not specified', size, loadMs: performance.now() - started,
       nodes, meshes, triangles: Math.round(triangles), materials: materials.size, textures: textures.size, bones, expressions,
-      authors: normalMeta?.authors ?? (normalMeta?.author ? [normalMeta.author] : []), license: normalMeta?.licenseUrl ?? normalMeta?.otherLicenseUrl ?? 'Not specified', items,
+      authors: normalMeta?.authors ?? (normalMeta?.author ? [normalMeta.author] : []), license: normalMeta?.licenseUrl ?? normalMeta?.otherLicenseUrl ?? 'Not specified',
+      licence: describeVrmMeta(meta as VRM1MetaLike | VRM0MetaLike | undefined), items,
       unsyncedDetachedSkeletons: this.duplicateBoneSync?.unsyncedDetachedSkeletons || undefined
     };
   }
@@ -193,8 +204,35 @@ export class ViewerController {
   /** Abandons any in-flight load; its result is disposed instead of being added to the scene. */
   cancelLoad() { this.loadRequest++; }
 
+  private metaVersion: string | undefined;
+  private thumbnails = new Map<string, string | null>();
+
+  /** Read-only description of a loaded material (by uuid) with small texture thumbnails, or null when not found. */
+  describeMaterial(uuid: string): MaterialDetails | null {
+    if (!this.model) return null;
+    const users: THREE.Material[] = [];
+    this.model.traverse(object => {
+      const mesh = object as THREE.Mesh;
+      const found = mesh.isMesh && (Array.isArray(mesh.material) ? mesh.material : [mesh.material]).find(m => m?.uuid === uuid);
+      if (found) users.push(found);
+    });
+    const material = users[0], meshCount = users.length;
+    if (!material) return null;
+    const details = describeMaterialInfo(material, meshCount, this.metaVersion);
+    const textures = new Map(listTextureSlots(material));
+    for (const entry of details.textures) {
+      const texture = textures.get(entry.slot);
+      if (!texture) continue;
+      if (!this.thumbnails.has(texture.uuid)) this.thumbnails.set(texture.uuid, textureThumbnail(texture));
+      entry.thumbnail = this.thumbnails.get(texture.uuid) ?? undefined;
+    }
+    return details;
+  }
+
   unload() {
     this.highlight.clear();
+    this.thumbnails.clear();
+    this.springs.clear();
     this.clearAnimation();
     this.stopLoop();
     if (!this.model) return;
@@ -434,16 +472,32 @@ export class ViewerController {
     this.scene.background = texture;
     this.render();
   }
+  /**
+   * Builds the spring bone overlay for the current VRM when visible, and rebuilds it after a new model loads.
+   * Helpers re-read their bone / collider world matrices when the renderer updates the scene, so no per-frame work is needed here.
+   */
+  private syncSprings() {
+    const manager = this.springsVisible ? this.vrm?.springBoneManager ?? null : null;
+    if (!this.springs.matches(manager)) this.springs.set(manager);
+  }
+  /** Joint and collider counts of the open VRM (zero for glTF or no model). */
+  getSpringBoneCounts() { return countSpringBones(this.vrm?.springBoneManager); }
+  /** Shows or hides the spring bone (cyan) and collider (magenta) overlay. The choice is kept for models loaded later. */
+  setSpringBonesVisible(visible: boolean) {
+    this.springsVisible = visible; this.springs.group.visible = visible;
+    this.render();
+    return this.getSpringBoneCounts();
+  }
   capture(transparent = false, scale = 1) {
     const old = this.scene.background, size = this.renderer.getSize(new THREE.Vector2()), ratio = this.renderer.getPixelRatio();
     if (transparent) this.scene.background = null;
-    this.highlight.group.visible = false;
+    this.highlight.group.visible = false; this.springs.group.visible = false;
     try {
       this.renderer.setPixelRatio(ratio * scale); this.renderer.setSize(size.x, size.y, false); this.render();
       return this.canvas.toDataURL('image/png');
     } finally {
-      this.scene.background = old; this.highlight.group.visible = true; this.renderer.setPixelRatio(ratio); this.renderer.setSize(size.x, size.y, false); this.render();
+      this.scene.background = old; this.highlight.group.visible = true; this.springs.group.visible = this.springsVisible; this.renderer.setPixelRatio(ratio); this.renderer.setSize(size.x, size.y, false); this.render();
     }
   }
-  dispose() { this.unload(); this.highlight.dispose(); this.backgroundRequest++; this.backgroundTexture?.dispose(); this.resizeObserver.disconnect(); this.controls.dispose(); this.renderer.dispose(); cancelAnimationFrame(this.raf); }
+  dispose() { this.unload(); this.highlight.dispose(); this.springs.dispose(); this.backgroundRequest++; this.backgroundTexture?.dispose(); this.resizeObserver.disconnect(); this.controls.dispose(); this.renderer.dispose(); cancelAnimationFrame(this.raf); }
 }

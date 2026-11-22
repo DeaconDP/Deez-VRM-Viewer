@@ -1,14 +1,14 @@
 # TODO
 
-Current epic: **E2 · Inspect deeper** (see [ROADMAP.md](ROADMAP.md)).
+Current epic: **E3 · Look dev and capture** (see [ROADMAP.md](ROADMAP.md)). E2 is done, awaiting merge in PRs #8 and #9.
 
-## E2 · Inspect deeper
+## E2 · Inspect deeper (done, awaiting merge in PRs #8, #9)
 
 - [x] Selecting a mesh, bone, node or material in the explorer highlights it in the viewport (double-click or Inspector "Frame selection" frames it; click again or Escape clears)
-- [ ] Material inspector: shader (MToon / PBR), textures with thumbnails, alpha mode
-- [ ] Spring bone and collider visualisation toggle
-- [ ] VRM licence fields shown in full (allowed users, commercial use, redistribution)
-- [ ] Explorer lists beyond 250 items per group (virtualised list)
+- [x] Material inspector: shader (MToon / PBR), textures with thumbnails, alpha mode
+- [x] Spring bone and collider visualisation toggle (toolbar or `B`: joints cyan, colliders magenta, hidden in captures)
+- [x] VRM licence fields shown in full (allowed users, commercial use, redistribution)
+- [x] Explorer lists beyond 250 items per group (virtualised list)
 
 ## E1 · Honest UI (done, awaiting merge in PR #7)
 
