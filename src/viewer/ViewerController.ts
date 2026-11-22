@@ -10,6 +10,7 @@ import { SelectionHighlight, type SelectionRef } from './selectionHighlight';
 import { describeVrmMeta, type VRM0MetaLike, type VRM1MetaLike } from './vrmMeta';
 import { describeMaterialInfo, listTextureSlots } from './materialInfo';
 import { textureThumbnail } from './textureThumbnail';
+import { SpringBoneOverlay, countSpringBones } from './springBoneOverlay';
 import { retargetQuaterniusClip, type QuaterniusAnimationId, type QuaterniusLibraryId } from './quaterniusAnimations';
 
 export type BuiltInAnimationId = QuaterniusAnimationId;
@@ -49,6 +50,8 @@ export class ViewerController {
   private fpsListener: ((fps: number | null) => void) | null = null;
   private loadRequest = 0;
   private highlight = new SelectionHighlight();
+  private springs = new SpringBoneOverlay();
+  private springsVisible = false;
   private quaterniusLoads = new Map<QuaterniusLibraryId, Promise<{ scene: THREE.Group; animations: THREE.AnimationClip[] }>>();
 
   constructor(private canvas: HTMLCanvasElement) {
@@ -74,6 +77,8 @@ export class ViewerController {
     this.rimLight.position.set(-4, 3, -4);
     this.scene.add(this.rimLight);
     this.scene.add(this.highlight.group);
+    this.springs.group.visible = false;
+    this.scene.add(this.springs.group);
     this.resizeObserver = new ResizeObserver(this.resize);
     this.resizeObserver.observe(canvas.parentElement!);
     this.resize();
@@ -120,6 +125,7 @@ export class ViewerController {
     this.vrm?.update(delta);
     if (this.turntable && this.model) this.model.rotation.y += delta * 0.35;
     this.controls.update();
+    this.syncSprings();
     this.highlight.update();
     this.renderer.render(this.scene, this.camera);
     const now = performance.now();
@@ -129,7 +135,7 @@ export class ViewerController {
     this.raf = requestAnimationFrame(this.tick);
   };
 
-  render = () => { this.highlight.update(); this.renderer.render(this.scene, this.camera); };
+  render = () => { this.syncSprings(); this.highlight.update(); this.renderer.render(this.scene, this.camera); };
   private startLoop() { if (!this.animate) { this.animate = true; this.fpsMeter.reset(); this.clock.start(); this.tick(); } }
   private stopLoop() {
     if (this.turntable || this.animationState.playing) return;
@@ -226,6 +232,7 @@ export class ViewerController {
   unload() {
     this.highlight.clear();
     this.thumbnails.clear();
+    this.springs.clear();
     this.clearAnimation();
     this.stopLoop();
     if (!this.model) return;
@@ -465,16 +472,32 @@ export class ViewerController {
     this.scene.background = texture;
     this.render();
   }
+  /**
+   * Builds the spring bone overlay for the current VRM when visible, and rebuilds it after a new model loads.
+   * Helpers re-read their bone / collider world matrices when the renderer updates the scene, so no per-frame work is needed here.
+   */
+  private syncSprings() {
+    const manager = this.springsVisible ? this.vrm?.springBoneManager ?? null : null;
+    if (!this.springs.matches(manager)) this.springs.set(manager);
+  }
+  /** Joint and collider counts of the open VRM (zero for glTF or no model). */
+  getSpringBoneCounts() { return countSpringBones(this.vrm?.springBoneManager); }
+  /** Shows or hides the spring bone (cyan) and collider (magenta) overlay. The choice is kept for models loaded later. */
+  setSpringBonesVisible(visible: boolean) {
+    this.springsVisible = visible; this.springs.group.visible = visible;
+    this.render();
+    return this.getSpringBoneCounts();
+  }
   capture(transparent = false, scale = 1) {
     const old = this.scene.background, size = this.renderer.getSize(new THREE.Vector2()), ratio = this.renderer.getPixelRatio();
     if (transparent) this.scene.background = null;
-    this.highlight.group.visible = false;
+    this.highlight.group.visible = false; this.springs.group.visible = false;
     try {
       this.renderer.setPixelRatio(ratio * scale); this.renderer.setSize(size.x, size.y, false); this.render();
       return this.canvas.toDataURL('image/png');
     } finally {
-      this.scene.background = old; this.highlight.group.visible = true; this.renderer.setPixelRatio(ratio); this.renderer.setSize(size.x, size.y, false); this.render();
+      this.scene.background = old; this.highlight.group.visible = true; this.springs.group.visible = this.springsVisible; this.renderer.setPixelRatio(ratio); this.renderer.setSize(size.x, size.y, false); this.render();
     }
   }
-  dispose() { this.unload(); this.highlight.dispose(); this.backgroundRequest++; this.backgroundTexture?.dispose(); this.resizeObserver.disconnect(); this.controls.dispose(); this.renderer.dispose(); cancelAnimationFrame(this.raf); }
+  dispose() { this.unload(); this.highlight.dispose(); this.springs.dispose(); this.backgroundRequest++; this.backgroundTexture?.dispose(); this.resizeObserver.disconnect(); this.controls.dispose(); this.renderer.dispose(); cancelAnimationFrame(this.raf); }
 }

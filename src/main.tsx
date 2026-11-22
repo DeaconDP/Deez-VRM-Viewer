@@ -1,9 +1,9 @@
 import { render } from 'preact';
-import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import {
   Aperture, BookOpen, Box, Camera, ChevronDown, ChevronRight, CircleHelp, Download, Eye, FileBox,
   FolderOpen, Gauge, Gift, Grid3X3, Hammer, Info, Maximize, Menu, PanelLeftClose, PanelRightClose,
-  Image, Pause, Play, RefreshCw, Rotate3D, Search, Settings, ShieldCheck, SkipBack, Sparkles, Square, Sun, Undo2, Upload, X
+  Image, Pause, Play, RefreshCw, Rotate3D, Search, Settings, ShieldCheck, SkipBack, Sparkles, Square, Sun, Undo2, Upload, Waypoints, X
 } from 'lucide-preact';
 import type { ComponentChildren } from 'preact';
 import type { AnimationLoopMode, AnimationState, LicenceInfo, LoadState, MaterialDetails, MetaValue, ModelSummary, TreeItem } from './types';
@@ -12,6 +12,7 @@ import { validateModelFile } from './platform/files';
 import { installDesktopBridge } from './platform/desktopBridge';
 import { saveLocalFile } from './platform/exportFile';
 import { QUATERNIUS_LIBRARIES } from './viewer/quaterniusAnimations';
+import { virtualWindow } from './ui/virtualWindow';
 import termsUrl from '../TERMS.md?url';
 import privacyUrl from '../PRIVACY.md?url';
 import licenseUrl from '../LICENSE?url';
@@ -79,6 +80,29 @@ function EmptyState({ onOpen, onUrl, onFreebie }: { onOpen: () => void; onUrl: (
 }
 
 const FRAMEABLE_KINDS: TreeItem['kind'][] = ['mesh', 'bone', 'node', 'material'];
+/** Matches the fixed `.tree details button` height in styles.css. */
+const TREE_ROW_HEIGHT = 31;
+const TREE_OVERSCAN = 12;
+type TreeView = { scrollTop: number; height: number };
+
+/** One explorer group's rows, windowed against the shared explorer scroll container so long groups stay cheap. */
+function TreeRows({ items, view, scroller, selected, setSelected, onFrame }: { items: TreeItem[]; view: TreeView; scroller: { current: HTMLElement | null }; selected: TreeItem | null; setSelected: (v: TreeItem | null) => void; onFrame: (v: TreeItem) => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [offset, setOffset] = useState(0);
+  // Where this list starts inside the scroll content; earlier groups opening or closing moves it.
+  useLayoutEffect(() => {
+    const host = scroller.current, list = ref.current;
+    if (!host || !list) return;
+    const next = list.getBoundingClientRect().top - host.getBoundingClientRect().top + host.scrollTop;
+    if (Math.abs(next - offset) > 0.5) setOffset(next);
+  });
+  const { start, end, top, bottom } = virtualWindow({ scrollTop: view.scrollTop, viewportHeight: view.height, rowHeight: TREE_ROW_HEIGHT, count: items.length, overscan: TREE_OVERSCAN, offset });
+  return <div ref={ref} class="tree-rows" role="group" style={{ paddingTop: top, paddingBottom: bottom }}>
+    {items.slice(start, end).map((item, n) => <button role="treeitem" aria-selected={selected?.id === item.id} aria-setsize={items.length} aria-posinset={start + n + 1} data-item-id={item.id} data-item-kind={item.kind} class={selected?.id === item.id ? 'selected' : ''} onClick={e => { if (e.detail < 2) setSelected(selected?.id === item.id ? null : item); }} onDblClick={() => FRAMEABLE_KINDS.includes(item.kind) && onFrame(item)} title={FRAMEABLE_KINDS.includes(item.kind) ? 'Click to select, double-click to frame' : undefined} key={item.id}>
+      <span class={`item-dot ${item.kind}`} /> <span>{item.label}</span>{item.detail && <small>{item.detail}</small>}
+    </button>)}
+  </div>;
+}
 
 function Explorer({ model, filter, setFilter, selected, setSelected, onFrame }: { model: ModelSummary | null; filter: string; setFilter: (v: string) => void; selected: TreeItem | null; setSelected: (v: TreeItem | null) => void; onFrame: (v: TreeItem) => void }) {
   const groups = useMemo(() => {
@@ -95,17 +119,24 @@ function Explorer({ model, filter, setFilter, selected, setSelected, onFrame }: 
   const allOpen = EXPLORER_GROUPS.every(name => openGroups[name]);
   const toggleAll = () => setOpenGroups(Object.fromEntries(EXPLORER_GROUPS.map(name => [name, !allOpen])));
   const moreLabel = allOpen ? 'Collapse all groups' : 'Expand all groups';
-  return <div class="panel-content explorer">
+  const scroller = useRef<HTMLDivElement>(null);
+  const [view, setView] = useState<TreeView>({ scrollTop: 0, height: 0 });
+  const measure = () => { const host = scroller.current; if (host) setView(old => old.scrollTop === host.scrollTop && old.height === host.clientHeight ? old : { scrollTop: host.scrollTop, height: host.clientHeight }); };
+  useLayoutEffect(() => {
+    measure();
+    const observer = new ResizeObserver(measure);
+    if (scroller.current) observer.observe(scroller.current);
+    return () => observer.disconnect();
+  }, []);
+  return <div class="panel-content explorer" ref={scroller} onScroll={measure} data-explorer-scroll>
     <div class="panel-heading"><div><span class="eyebrow">MODEL STRUCTURE</span><h2>Scene Explorer</h2></div><button class="more" disabled={!model} aria-label={moreLabel} title={moreLabel} onClick={toggleAll}>•••</button></div>
     <label class="search"><Search /><input value={filter} onInput={e => setFilter(e.currentTarget.value)} placeholder="Filter scene" aria-label="Filter scene" /></label>
     <div class="tree" role="tree">
       <div class="tree-root"><ChevronDown /><Box /><span>{model?.name ?? 'Scene'}</span></div>
       {!model && <p class="muted tree-empty">Open a model to inspect its contents.</p>}
-      {groups.map(([name, items]) => <details open={!!openGroups[name]} onToggle={e => { const open = e.currentTarget.open; setOpenGroups(old => !!old[name] === open ? old : { ...old, [name]: open }); }} key={name}>
+      {groups.map(([name, items]) => <details open={!!openGroups[name]} onToggle={e => { const open = e.currentTarget.open; setOpenGroups(old => !!old[name] === open ? old : { ...old, [name]: open }); }} data-group={name} data-total={items.length} key={name}>
         <summary><span>{name}</span><b>{items.length}</b></summary>
-        {items.slice(0, 250).map(item => <button role="treeitem" aria-selected={selected?.id === item.id} data-item-id={item.id} data-item-kind={item.kind} class={selected?.id === item.id ? 'selected' : ''} onClick={e => { if (e.detail < 2) setSelected(selected?.id === item.id ? null : item); }} onDblClick={() => FRAMEABLE_KINDS.includes(item.kind) && onFrame(item)} title={FRAMEABLE_KINDS.includes(item.kind) ? 'Click to select, double-click to frame' : undefined} key={item.id}>
-          <span class={`item-dot ${item.kind}`} /> <span>{item.label}</span>{item.detail && <small>{item.detail}</small>}
-        </button>)}
+        {openGroups[name] && <TreeRows items={items} view={view} scroller={scroller} selected={selected} setSelected={setSelected} onFrame={onFrame} />}
       </details>)}
     </div>
   </div>;
@@ -313,6 +344,12 @@ function App() {
   const [legalAccepted, setLegalAccepted] = useState(hasAcceptedLegal), [legalView, setLegalView] = useState<LegalView>('about'), [legalOpen, setLegalOpen] = useState(false);
   const [viewerReady, setViewerReady] = useState(false), [fps, setFps] = useState<number | null>(null);
   const [highlight, setHighlight] = useState<{ kind: string; count: number }>({ kind: '', count: 0 });
+  const [springs, setSprings] = useState({ visible: false, joints: 0, colliders: 0 });
+  const isVRM = model?.format === 'VRM';
+  useEffect(() => { const counts = controller.current?.getSpringBoneCounts() ?? { joints: 0, colliders: 0 }; setSprings(old => ({ ...old, ...counts })); }, [model, viewerReady]);
+  const toggleSprings = useRef(() => {});
+  toggleSprings.current = () => { if (!controller.current || !isVRM) return; const visible = !springs.visible; setSprings({ visible, ...controller.current.setSpringBonesVisible(visible) }); };
+  const springLabel = isVRM ? `Spring bones · ${springs.joints} joint${springs.joints === 1 ? '' : 's'} · ${springs.colliders} collider${springs.colliders === 1 ? '' : 's'}` : 'Spring bones (VRM only)';
   useEffect(() => {
     const count = controller.current?.setSelection(selected) ?? 0;
     setHighlight({ kind: count && selected ? selected.kind : '', count });
@@ -538,7 +575,7 @@ function App() {
     }
   };
 
-  useEffect(() => { const keys = (e: KeyboardEvent) => { if ((e.target as HTMLElement).matches('input,textarea')) return; if (e.key.toLowerCase() === 'g') setGrid(controller.current?.toggleGrid() ?? false); if (e.key === 'Home' || e.key.toLowerCase() === 'f') controller.current?.frameAll(); if (e.key === 'Escape') { setUrlOpen(false); setCaptureOpen(false); setSelected(null); } }; addEventListener('keydown', keys); return () => removeEventListener('keydown', keys); }, []);
+  useEffect(() => { const keys = (e: KeyboardEvent) => { if ((e.target as HTMLElement).matches('input,textarea')) return; if (e.key.toLowerCase() === 'g') setGrid(controller.current?.toggleGrid() ?? false); if (e.key.toLowerCase() === 'b' && !e.ctrlKey && !e.metaKey && !e.altKey) toggleSprings.current(); if (e.key === 'Home' || e.key.toLowerCase() === 'f') controller.current?.frameAll(); if (e.key === 'Escape') { setUrlOpen(false); setCaptureOpen(false); setSelected(null); } }; addEventListener('keydown', keys); return () => removeEventListener('keydown', keys); }, []);
 
   return <main class={`app ${!leftOpen ? 'left-closed' : ''} ${!rightOpen ? 'right-closed' : ''}`} onDragOver={e => e.preventDefault()} onDrop={onDrop}>
     <header class="toolbar">
@@ -552,6 +589,7 @@ function App() {
         {(['front', 'back', 'left', 'right'] as const).map(view => <button class="view-button hide-mobile" onClick={() => controller.current?.setView(view)} title={`${view} view`}>{view[0].toUpperCase()}</button>)}
         <IconButton label="Turntable" active={turntable} onClick={() => setTurntable(controller.current?.toggleTurntable() ?? false)} hideMobile>{turntable ? <Square /> : <Play />}</IconButton>
         <IconButton label="Grid" active={grid} onClick={() => setGrid(controller.current?.toggleGrid() ?? false)} hideMobile><Grid3X3 /></IconButton>
+        <IconButton label={springLabel} active={isVRM && springs.visible} disabled={!isVRM} onClick={() => toggleSprings.current()} hideMobile><Waypoints /></IconButton>
         <IconButton label="Screenshot" onClick={() => setCaptureOpen(true)}><Camera /></IconButton>
       </div>
       <div class="toolbar-actions utility-actions"><IconButton label="Scene appearance" active={rightTab === 'scene'} onClick={() => { setRightTab('scene'); setRightOpen(true); }}><Sparkles /></IconButton><IconButton label="Animation preview" active={rightTab === 'animation'} onClick={() => { setRightTab('animation'); setRightOpen(true); }}><Play /></IconButton><IconButton label="Bake meshes" active={rightTab === 'bake'} onClick={() => { setRightTab('bake'); setRightOpen(true); }}><Hammer /></IconButton><IconButton label="About and legal" onClick={() => showLegal('about')} hideMobile><CircleHelp /></IconButton><IconButton label="Legal menu" onClick={() => showLegal('terms')}><Menu /></IconButton></div>
@@ -560,7 +598,7 @@ function App() {
       <input ref={backgroundInput} hidden type="file" accept="image/*" onChange={e => { const file = e.currentTarget.files?.[0]; if (file) openBackground(file); e.currentTarget.value = ''; }} />
     </header>
     <aside class="left-panel"><Explorer model={model} filter={filter} setFilter={setFilter} selected={selected} setSelected={setSelected} onFrame={frameItem} /></aside>
-    <section class="viewport" data-selection-kind={highlight.kind} data-selection-count={highlight.count}>
+    <section class="viewport" data-selection-kind={highlight.kind} data-selection-count={highlight.count} data-spring-visible={isVRM && springs.visible} data-spring-joints={springs.joints} data-spring-colliders={springs.colliders}>
       <canvas ref={canvasRef} aria-label={model ? `3D view of ${model.name}` : 'Empty 3D model viewport'} />
       {state === 'idle' && <EmptyState onOpen={() => fileInput.current?.click()} onUrl={() => setUrlOpen(true)} onFreebie={() => void loadFreebie()} />}
       {state === 'parsing' && <div class="loading"><div class="spinner" /><b>Opening {fileName}</b><span>{progress ? `${Math.round(progress * 100)}%` : 'Reading model…'}</span><div class="progress"><i style={{ width: `${Math.max(8, progress * 100)}%` }} /></div></div>}
