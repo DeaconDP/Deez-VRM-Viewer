@@ -13,7 +13,7 @@ Concrete next tasks live in [TODO.md](TODO.md).
 - Random CC0 freebie loader (ToxSam open-source avatars)
 - Tauri 2 desktop shell with native save dialogs and a navigation guard
 
-## E1 · Honest UI (Next)
+## E1 · Honest UI (PR #7)
 
 Every visible control must do what it says, and every failure must reach the user.
 
@@ -23,7 +23,7 @@ Every visible control must do what it says, and every failure must reach the use
 - Desktop open, drop and file-association errors show in the viewport instead of only the console
 - Rust unit tests for the path guards in `src-tauri/src/lib.rs`
 
-## E2 · Inspect deeper
+## E2 · Inspect deeper (In progress)
 
 - Selecting a mesh or bone in the explorer highlights it in the viewport
 - Material inspector: shader (MToon / PBR), textures with thumbnails, alpha mode
