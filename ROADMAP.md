@@ -43,8 +43,9 @@ Every visible control must do what it says, and every failure must reach the use
 - Signed Windows installer and notarised macOS build from CI: a `v*` tag builds the NSIS installer and a universal macOS `.dmg` into a draft GitHub release, signed and notarised only when the repository secrets are set ([docs/RELEASING.md](docs/RELEASING.md))
 - Content Security Policy for the Tauri shell, with every source explained in [docs/SECURITY.md](docs/SECURITY.md)
 - Exports are written only where the native save dialog says: `save_export_file` opens the dialog in Rust, so the webview never names a path
-- Split the 560 kB viewer chunk (three / three-vrm) for faster first load
-- Playwright smoke test that loads a fixture VRM in the web build
+- Split the 560 kB viewer chunk (three / three-vrm) for faster first load: the startup chunk is now 85 kB
+- Playwright smoke test that loads a fixture VRM in the web build (`npm run test:e2e`, generated VRM 1.0 fixture)
+- CI on every push and pull request: unit tests, builds, smoke tests and Rust tests
 
 ## Deferred
 

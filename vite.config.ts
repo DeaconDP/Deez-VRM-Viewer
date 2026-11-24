@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from 'vite';
 import preact from '@preact/preset-vite';
 import { VitePWA } from 'vite-plugin-pwa';
@@ -19,6 +20,24 @@ export default defineConfig(({ mode }) => ({
     host: '127.0.0.1',
     port: STICKY_PORT,
     strictPort: true
+  },
+  test: {
+    // Unit tests only; the Playwright smoke tests in e2e/ run through `npm run test:e2e`.
+    include: ['src/**/*.test.{ts,tsx}']
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        // Vendor code changes far less often than the app, so keep it in its own long-cached chunks.
+        // three-vrm-animation is left out on purpose: it is imported on demand when a .vrma is opened.
+        // three is split in two (scene graph/maths core vs WebGL renderer + loaders) to keep each chunk under 500 kB.
+        manualChunks(id) {
+          if (/[\\/]node_modules[\\/]three[\\/]build[\\/]three\.core\.js$/.test(id)) return 'three-core';
+          if (/[\\/]node_modules[\\/]three[\\/]/.test(id)) return 'three';
+          if (/[\\/]node_modules[\\/]@pixiv[\\/]three-vrm(-core|-materials-[a-z0-9-]+|-node-constraint|-springbone)?[\\/]/.test(id)) return 'three-vrm';
+        }
+      }
+    }
   },
   plugins: [
     preact(),
