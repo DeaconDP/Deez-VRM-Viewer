@@ -1,0 +1,186 @@
+# Builds the desktop app for Windows (NSIS installer) and macOS (universal .app + .dmg)
+# and attaches the bundles to a DRAFT GitHub release (tag v<version from tauri.conf.json>). Nothing is published automatically.
+#
+# Signing is driven only by repository secrets (see docs/RELEASING.md). When a platform's
+# secrets are missing that platform is built unsigned and the job still succeeds.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  draft:
+    name: Create draft release
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.release.outputs.id }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      # One job creates (or reuses) the draft so the two platform builds never race
+      # to create duplicate releases.
+      - name: Create or reuse draft release
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          tag="v${version}"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "${tag}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match tauri.conf.json version ${version} (expected ${tag})."
+            exit 1
+          fi
+          existing=$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"${tag}\") | \"\(.id) \(.draft)\"" | head -n 1)
+          if [ -n "${existing}" ]; then
+            read -r id draft <<< "${existing}"
+            if [ "${draft}" != "true" ]; then
+              echo "::error::Release ${tag} is already published. Bump the version in src-tauri/tauri.conf.json first."
+              exit 1
+            fi
+            echo "Reusing draft release ${tag} (${id})."
+          else
+            notes_file="${RUNNER_TEMP}/notes.md"
+            cat > "${notes_file}" <<NOTES
+          Desktop builds of Deez VRM Viewer ${tag}.
+
+          - Windows: \`Deez VRM Viewer_${version}_x64-setup.exe\` (per-user NSIS installer)
+          - macOS (Apple Silicon and Intel): \`Deez VRM Viewer_${version}_universal.dmg\`
+
+          By deac online · Worldbuild.io
+          NOTES
+            gh release create "${tag}" --draft --target "${GITHUB_SHA}" \
+              --title "Deez VRM Viewer ${tag}" --notes-file "${notes_file}"
+            id=$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
+              --jq ".[] | select(.tag_name == \"${tag}\" and .draft) | .id" | head -n 1)
+          fi
+          echo "id=${id}" >> "${GITHUB_OUTPUT}"
+
+  build:
+    name: Build (${{ matrix.name }})
+    needs: draft
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            platform: windows-latest
+            args: '--bundles nsis'
+          - name: macOS universal
+            platform: macos-latest
+            args: '--target universal-apple-darwin --bundles app,dmg'
+    runs-on: ${{ matrix.platform }}
+    env:
+      # Secrets cannot be read in `if:` expressions directly; expose presence flags instead.
+      HAS_WINDOWS_CERT: ${{ secrets.WINDOWS_CERTIFICATE != '' && secrets.WINDOWS_CERTIFICATE_PASSWORD != '' }}
+      HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
+      HAS_APPLE_NOTARY: ${{ secrets.APPLE_ID != '' && secrets.APPLE_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Unit tests
+        run: npx vitest run
+
+      # --- Windows code signing (optional) -------------------------------------------
+      # Imports the PFX into the runner's user certificate store and passes its thumbprint
+      # to `tauri build` through a config override that exists only for this run.
+      - name: Import Windows signing certificate
+        id: wincert
+        if: runner.os == 'Windows' && env.HAS_WINDOWS_CERT == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'signing.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          Remove-Item $pfx -Force
+          $timestamp = if ($env:WINDOWS_TIMESTAMP_URL) { $env:WINDOWS_TIMESTAMP_URL } else { 'http://timestamp.digicert.com' }
+          $override = @{ bundle = @{ windows = @{ certificateThumbprint = $cert.Thumbprint; digestAlgorithm = 'sha256'; timestampUrl = $timestamp } } }
+          $overridePath = Join-Path $env:RUNNER_TEMP 'tauri.signing.conf.json'
+          $override | ConvertTo-Json -Depth 5 | Set-Content -Path $overridePath -Encoding utf8
+          "args=--config $($overridePath -replace '\\','/')" >> $env:GITHUB_OUTPUT
+          Write-Host "Signing with certificate $($cert.Subject)"
+
+      - name: Windows build is unsigned
+        if: runner.os == 'Windows' && env.HAS_WINDOWS_CERT != 'true'
+        run: echo "::warning::WINDOWS_CERTIFICATE / WINDOWS_CERTIFICATE_PASSWORD not set; building an unsigned installer."
+
+      # --- macOS signing and notarisation (optional) ---------------------------------
+      # Tauri treats a present-but-empty APPLE_* variable as configured, so only export
+      # the ones that are actually set. Without a certificate the app is ad-hoc signed
+      # ("-") so it still launches on Apple Silicon after the user clears quarantine.
+      - name: Configure macOS signing
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          export_var() {
+            local delimiter="EOF_$(openssl rand -hex 8)"
+            { echo "$1<<${delimiter}"; printf '%s\n' "$2"; echo "${delimiter}"; } >> "$GITHUB_ENV"
+          }
+          if [ "$HAS_APPLE_CERT" = "true" ]; then
+            export_var APPLE_CERTIFICATE "$APPLE_CERTIFICATE"
+            export_var APPLE_CERTIFICATE_PASSWORD "$APPLE_CERTIFICATE_PASSWORD"
+            export_var APPLE_SIGNING_IDENTITY "$APPLE_SIGNING_IDENTITY"
+            if [ "$HAS_APPLE_NOTARY" = "true" ]; then
+              export_var APPLE_ID "$APPLE_ID"
+              export_var APPLE_PASSWORD "$APPLE_PASSWORD"
+              export_var APPLE_TEAM_ID "$APPLE_TEAM_ID"
+              echo "Signing with a Developer ID certificate and notarising."
+            else
+              echo "::warning::APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID not set; the app is signed but not notarised."
+            fi
+          else
+            export_var APPLE_SIGNING_IDENTITY "-"
+            echo "::warning::APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD / APPLE_SIGNING_IDENTITY not set; building an ad-hoc signed, un-notarised app."
+          fi
+
+      - name: Build and attach to draft release
+        # tauri-apps/tauri-action v1.0.0
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          releaseId: ${{ needs.draft.outputs.release_id }}
+          args: ${{ matrix.args }} ${{ steps.wincert.outputs.args }}
