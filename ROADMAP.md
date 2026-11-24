@@ -43,8 +43,9 @@ Every visible control must do what it says, and every failure must reach the use
 - Signed Windows installer and notarised macOS build from CI
 - Content Security Policy for the Tauri shell (`security.csp` is currently `null`)
 - Restrict `write_export_file` to paths the save dialog returned
-- Split the 560 kB viewer chunk (three / three-vrm) for faster first load
-- Playwright smoke test that loads a fixture VRM in the web build
+- Split the 560 kB viewer chunk (three / three-vrm) for faster first load: the startup chunk is now 85 kB
+- Playwright smoke test that loads a fixture VRM in the web build (`npm run test:e2e`, generated VRM 1.0 fixture)
+- CI on every push and pull request: unit tests, builds, smoke tests and Rust tests
 
 ## Deferred
 
