@@ -1,6 +1,3 @@
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
-import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { createOpenQueue, errorMessage } from './openQueue';
 
 type ModelPayload = { name: string; bytes: Uint8Array };
@@ -27,16 +24,31 @@ export function installDesktopBridge() {
   const errors = createOpenQueue<string>();
   const fail = (reason: unknown) => { console.error(reason); errors.deliver(errorMessage(reason)); };
 
-  const loadPath = async (path: string) => {
-    const result = await invoke<{ name: string; bytes: number[] | Uint8Array }>('read_model_file', { path });
-    models.deliver({ name: result.name, bytes: toBytes(result.bytes) });
-  };
-
   window.desktop = { onOpenModel: models.subscribe, onOpenError: errors.subscribe };
 
-  void listen<string>('open-model-path', event => {
-    void loadPath(event.payload).catch(fail);
-  });
+  // The Tauri APIs are only fetched inside the desktop shell, so the web build's startup chunk stays free of them.
+  // Opens and errors are queued until the app subscribes; Rust keeps each open until the page pulls it (see wireDesktopEvents).
+  void Promise.all([import('@tauri-apps/api/core'), import('@tauri-apps/api/event'), import('@tauri-apps/api/webview')])
+    .then(([{ invoke }, { listen }, { getCurrentWebview }]) => wireDesktopEvents(invoke, listen, getCurrentWebview, models.deliver, fail))
+    .catch(fail);
+}
+
+type TauriCore = typeof import('@tauri-apps/api/core');
+type TauriEvent = typeof import('@tauri-apps/api/event');
+type TauriWebview = typeof import('@tauri-apps/api/webview');
+
+function wireDesktopEvents(invoke: TauriCore['invoke'], listen: TauriEvent['listen'], getCurrentWebview: TauriWebview['getCurrentWebview'], deliver: (payload: ModelPayload) => void, fail: (reason: unknown) => void) {
+  const loadPath = async (path: string) => {
+    const result = await invoke<{ name: string; bytes: number[] | Uint8Array }>('read_model_file', { path });
+    deliver({ name: result.name, bytes: toBytes(result.bytes) });
+  };
+
+  // Rust stores each open and sends a payload-free ping; pulling the path (once the listener exists, then on every ping)
+  // means an open sent while this page was still loading is never dropped.
+  const takePending = () => invoke<string | null>('take_pending_model_path')
+    .then(path => { if (path) return loadPath(path); })
+    .catch(fail);
+  void listen('open-model-pending', () => { void takePending(); }).then(takePending, fail);
 
   void getCurrentWebview().onDragDropEvent(event => {
     if (event.payload.type !== 'drop') return;
@@ -47,8 +59,4 @@ export function installDesktopBridge() {
     }
     void loadPath(path).catch(fail);
   }).catch(error => console.error(error));
-
-  void invoke<string | null>('take_pending_model_path')
-    .then(path => { if (path) return loadPath(path); })
-    .catch(fail);
 }

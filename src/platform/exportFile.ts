@@ -1,9 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
-import { save } from '@tauri-apps/plugin-dialog';
 
 export type SaveFilter = { name: string; extensions: string[] };
 
-/** Save dialog filters for every export type `write_export_file` accepts on desktop. */
+/** Save dialog filters for every export type `save_export_file` accepts on desktop. */
 export const EXPORT_FILTERS: Record<'vrm' | 'png' | 'webm' | 'mp4', SaveFilter> = {
   vrm: { name: 'VRM', extensions: ['vrm'] },
   png: { name: 'PNG image', extensions: ['png'] },
@@ -30,6 +29,20 @@ function downloadInBrowser(bytes: Uint8Array, fileName: string, mimeType: string
   setTimeout(() => URL.revokeObjectURL(url), 30_000);
 }
 
+/**
+ * Arguments for the desktop `save_export_file` command. There is deliberately no
+ * path: the Rust side opens the native Save dialog and writes only where the user chose.
+ */
+export function desktopSaveArgs(options: { bytes: Uint8Array; fileName: string; title?: string; filters: SaveFilter[] }) {
+  return {
+    title: options.title ?? null,
+    defaultName: options.fileName,
+    filterName: options.filters[0]?.name ?? 'Export',
+    extensions: options.filters.flatMap(filter => filter.extensions),
+    bytes: options.bytes
+  };
+}
+
 /** Save bytes via a native Save dialog on Tauri, or a browser download otherwise. */
 export async function saveLocalFile(options: {
   bytes: Uint8Array;
@@ -45,13 +58,6 @@ export async function saveLocalFile(options: {
     return { saved: true };
   }
 
-  const path = await save({
-    title: options.title,
-    defaultPath: options.fileName,
-    filters: options.filters
-  });
-  if (!path) return { saved: false };
-
-  await invoke('write_export_file', { path, bytes: options.bytes });
-  return { saved: true, path };
+  const result = await invoke<{ saved: boolean; path?: string }>('save_export_file', desktopSaveArgs(options));
+  return result.saved ? { saved: true, path: result.path } : { saved: false };
 }

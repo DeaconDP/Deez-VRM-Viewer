@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use serde::Serialize;
@@ -7,9 +7,6 @@ use tauri::plugin::Builder as PluginBuilder;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
-
-#[cfg(all(windows, not(debug_assertions)))]
-use std::path::Path;
 
 #[cfg(all(windows, not(debug_assertions)))]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -153,16 +150,16 @@ fn focus_main_window(app: &AppHandle) {
     }
 }
 
+/// Stores the path for the frontend to take and pings it. The ping carries no path: an event sent before the page has
+/// registered its listener is dropped, so the frontend always pulls with `take_pending_model_path` (on startup once its
+/// listener exists, then on every ping), and no open is lost while the window is still loading. The newest open wins.
 fn emit_model_path(app: &AppHandle, path: PathBuf) {
-    let _ = app.emit("open-model-path", path.to_string_lossy().to_string());
-}
-
-fn queue_or_emit_model(app: &AppHandle, pending: &PendingModel, path: PathBuf) {
-    if app.get_webview_window("main").is_some() {
-        emit_model_path(app, path);
-    } else if let Ok(mut guard) = pending.0.lock() {
-        *guard = Some(path);
+    if let Some(pending) = app.try_state::<PendingModel>() {
+        if let Ok(mut guard) = pending.0.lock() {
+            *guard = Some(path);
+        }
     }
+    let _ = app.emit("open-model-pending", ());
 }
 
 fn choose_model(app: &AppHandle) {
@@ -218,21 +215,155 @@ fn take_pending_model_path(pending: State<'_, PendingModel>) -> Option<String> {
         .map(|path| path.to_string_lossy().into_owned())
 }
 
-#[tauri::command]
-fn write_export_file(path: String, bytes: Vec<u8>) -> Result<(), String> {
-    if !is_export_path(&path) {
-        return Err("Exports must be saved as .vrm, .png, .webm, or .mp4.".into());
-    }
+/// File extensions the desktop shell will ever write, lowercase and without the dot.
+const EXPORT_EXTENSIONS: [&str; 4] = ["vrm", "png", "webm", "mp4"];
+
+/// What the webview asked to save. It never contains a destination path: the
+/// path only ever comes from the native save dialog opened on the Rust side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExportRequest {
+    default_name: String,
+    filter_name: String,
+    extensions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct SaveExportResult {
+    saved: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+}
+
+/// Validates a save request before any dialog is shown: non-empty bytes, at
+/// least one allowlisted extension, and a bare default file name (any
+/// directory part supplied by the webview is dropped so it cannot steer the
+/// dialog's starting folder).
+fn validate_export_request(
+    default_name: &str,
+    filter_name: &str,
+    extensions: &[String],
+    bytes: &[u8],
+) -> Result<ExportRequest, String> {
     if bytes.is_empty() {
         return Err("Refusing to write an empty export.".into());
     }
-    let path = PathBuf::from(&path);
+    let mut normalized: Vec<String> = Vec::new();
+    for extension in extensions {
+        let extension = extension.trim().trim_start_matches('.').to_ascii_lowercase();
+        if !EXPORT_EXTENSIONS.contains(&extension.as_str()) {
+            return Err("Exports must be saved as .vrm, .png, .webm, or .mp4.".into());
+        }
+        if !normalized.contains(&extension) {
+            normalized.push(extension);
+        }
+    }
+    if normalized.is_empty() {
+        return Err("Exports must be saved as .vrm, .png, .webm, or .mp4.".into());
+    }
+    let base_name = default_name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let default_name = if base_name.is_empty() || base_name == "." || base_name == ".." {
+        format!("export.{}", normalized[0])
+    } else {
+        base_name
+    };
+    let filter_name = if filter_name.trim().is_empty() {
+        "Export".to_string()
+    } else {
+        filter_name.trim().to_string()
+    };
+    Ok(ExportRequest {
+        default_name,
+        filter_name,
+        extensions: normalized,
+    })
+}
+
+fn has_requested_extension(path: &Path, extensions: &[String]) -> bool {
+    is_export_path(&path.to_string_lossy())
+        && path
+            .extension()
+            .map(|extension| extension.to_string_lossy().to_ascii_lowercase())
+            .is_some_and(|extension| extensions.contains(&extension))
+}
+
+/// Writes an export to the path the native dialog returned. `None` means the
+/// user cancelled. The path must still carry one of the requested (and
+/// allowlisted) extensions, because some platforms let the user type any name.
+fn write_dialog_export(
+    chosen: Option<PathBuf>,
+    request: &ExportRequest,
+    bytes: &[u8],
+) -> Result<SaveExportResult, String> {
+    let Some(path) = chosen else {
+        return Ok(SaveExportResult {
+            saved: false,
+            path: None,
+        });
+    };
+    if bytes.is_empty() {
+        return Err("Refusing to write an empty export.".into());
+    }
+    if !has_requested_extension(&path, &request.extensions) {
+        let expected = request
+            .extensions
+            .iter()
+            .map(|extension| format!(".{extension}"))
+            .collect::<Vec<_>>()
+            .join(" or ");
+        return Err(format!("This export must be saved as {expected}."));
+    }
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
     }
-    std::fs::write(&path, bytes).map_err(|error| error.to_string())
+    std::fs::write(&path, bytes).map_err(|error| error.to_string())?;
+    Ok(SaveExportResult {
+        saved: true,
+        path: Some(path.to_string_lossy().into_owned()),
+    })
+}
+
+/// Opens the native Save dialog and writes `bytes` only to the path the user
+/// picked there; the webview can never name a destination. Async so the
+/// blocking dialog never runs on the main thread.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn save_export_file(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    title: Option<String>,
+    default_name: String,
+    filter_name: String,
+    extensions: Vec<String>,
+    bytes: Vec<u8>,
+) -> Result<SaveExportResult, String> {
+    let request = validate_export_request(&default_name, &filter_name, &extensions, &bytes)?;
+    let extension_refs: Vec<&str> = request.extensions.iter().map(String::as_str).collect();
+    let mut dialog = app
+        .dialog()
+        .file()
+        .set_file_name(&request.default_name)
+        .add_filter(&request.filter_name, &extension_refs);
+    if let Some(title) = title.filter(|title| !title.trim().is_empty()) {
+        dialog = dialog.set_title(title);
+    }
+    #[cfg(desktop)]
+    {
+        dialog = dialog.set_parent(&window);
+    }
+    #[cfg(not(desktop))]
+    let _ = &window;
+    let chosen = match dialog.blocking_save_file() {
+        Some(file) => Some(file.into_path().map_err(|error| error.to_string())?),
+        None => None,
+    };
+    write_dialog_export(chosen, &request, &bytes)
 }
 
 fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
@@ -316,7 +447,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             read_model_file,
             take_pending_model_path,
-            write_export_file
+            save_export_file
         ]);
 
     #[cfg(desktop)]
@@ -324,11 +455,7 @@ pub fn run() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             focus_main_window(app);
             if let Some(path) = model_path_from_args(&args) {
-                if let Some(pending) = app.try_state::<PendingModel>() {
-                    queue_or_emit_model(app, pending.inner(), path);
-                } else {
-                    emit_model_path(app, path);
-                }
+                emit_model_path(app, path);
             }
         }));
     }
@@ -362,16 +489,6 @@ pub fn run() {
             }
             _ => {}
         })
-        .on_page_load(|window, _payload| {
-            let app = window.app_handle();
-            if let Some(pending) = app.try_state::<PendingModel>() {
-                if let Ok(mut guard) = pending.0.lock() {
-                    if let Some(path) = guard.take() {
-                        emit_model_path(app, path);
-                    }
-                }
-            }
-        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -379,7 +496,6 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -558,55 +674,142 @@ mod tests {
         assert!(read_model_file(path_string(&path)).is_err());
     }
 
+    fn strings(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn request(extensions: &[&str]) -> ExportRequest {
+        validate_export_request("avatar.png", "Export", &strings(extensions), &[1])
+            .expect("valid request")
+    }
+
     #[test]
-    fn write_export_file_rejects_non_export_paths() {
-        for name in ["out.glb", "out.exe", "out.vrm.exe", "spin.webm.exe"] {
-            let path = unique_temp_path(name);
-            let result = write_export_file(path_string(&path), vec![1, 2, 3]);
+    fn validate_export_request_rejects_empty_bytes_before_any_dialog() {
+        assert_eq!(
+            validate_export_request("shot.png", "PNG image", &strings(&["png"]), &[]),
+            Err("Refusing to write an empty export.".to_string())
+        );
+    }
+
+    #[test]
+    fn validate_export_request_rejects_non_allowlisted_or_missing_extensions() {
+        for extensions in [
+            vec![],
+            vec!["exe"],
+            vec!["png", "exe"],
+            vec!["glb"],
+            vec!["vrm.exe"],
+        ] {
             assert_eq!(
-                result,
+                validate_export_request("out.png", "X", &strings(&extensions), &[1]),
                 Err("Exports must be saved as .vrm, .png, .webm, or .mp4.".to_string()),
-                "for {name}"
+                "for {extensions:?}"
             );
-            assert!(!path.exists());
         }
     }
 
     #[test]
-    fn write_export_file_rejects_empty_bytes() {
+    fn validate_export_request_normalizes_extensions_and_strips_directories() {
+        let request = validate_export_request(
+            r"C:\Windows\System32\..\evil/avatar-turntable.webm",
+            "  ",
+            &strings(&[".WEBM", "webm", "Mp4"]),
+            &[1],
+        )
+        .expect("valid request");
+        assert_eq!(request.default_name, "avatar-turntable.webm");
+        assert_eq!(request.filter_name, "Export");
+        assert_eq!(request.extensions, strings(&["webm", "mp4"]));
+
+        let fallback = validate_export_request("../", "VRM", &strings(&["vrm"]), &[1]).unwrap();
+        assert_eq!(fallback.default_name, "export.vrm");
+    }
+
+    #[test]
+    fn write_dialog_export_cancel_writes_nothing() {
+        let result = write_dialog_export(None, &request(&["png"]), &[1, 2, 3]);
+        assert_eq!(
+            result,
+            Ok(SaveExportResult {
+                saved: false,
+                path: None
+            })
+        );
+    }
+
+    #[test]
+    fn write_dialog_export_rejects_dialog_path_with_wrong_extension() {
+        let root = unique_temp_path("wrong-ext");
+        for name in ["shot.jpg", "shot.png.exe", "shot", "shot.vrm", "spin.webm"] {
+            let path = root.join("nested").join(name);
+            let result = write_dialog_export(Some(path.clone()), &request(&["png"]), &[1, 2, 3]);
+            assert_eq!(
+                result,
+                Err("This export must be saved as .png.".to_string()),
+                "for {name}"
+            );
+            assert!(!path.exists(), "{name} must not be written");
+        }
+        assert!(!root.exists(), "no directories are created for a rejected path");
+    }
+
+    #[test]
+    fn write_dialog_export_rejects_empty_bytes() {
         let path = unique_temp_path("empty.png");
-        let result = write_export_file(path_string(&path), Vec::new());
+        let result = write_dialog_export(Some(path.clone()), &request(&["png"]), &[]);
         assert_eq!(result, Err("Refusing to write an empty export.".to_string()));
         assert!(!path.exists());
     }
 
     #[test]
-    fn write_export_file_creates_nested_dirs_and_writes_bytes() {
+    fn write_dialog_export_creates_nested_dirs_and_writes_bytes() {
         let root = unique_temp_path("export-dir");
-        let path = root.join("nested").join("deeper").join("out.vrm");
+        let path = root.join("nested").join("deeper").join("out.VRM");
         assert!(!root.exists());
         let content = vec![0u8, 1, 2, 3, 254, 255];
-        let result = write_export_file(path_string(&path), content.clone());
+        let result = write_dialog_export(Some(path.clone()), &request(&["vrm"]), &content);
         let written = std::fs::read(&path);
         let _ = std::fs::remove_dir_all(&root);
-        assert_eq!(result, Ok(()));
+        assert_eq!(
+            result,
+            Ok(SaveExportResult {
+                saved: true,
+                path: Some(path_string(&path))
+            })
+        );
         assert_eq!(written.expect("read back export"), content);
-        assert!(!root.exists());
     }
 
     #[test]
-    fn write_export_file_writes_video_files() {
+    fn write_dialog_export_writes_any_requested_video_extension() {
         let root = unique_temp_path("video-dir");
         for name in ["spin.webm", "clip.MP4"] {
             let path = root.join(name);
             let content = vec![0x1a, 0x45, 0xdf, 0xa3, 1, 2];
-            assert_eq!(
-                write_export_file(path_string(&path), content.clone()),
-                Ok(()),
+            let result =
+                write_dialog_export(Some(path.clone()), &request(&["webm", "mp4"]), &content);
+            assert!(
+                matches!(result, Ok(SaveExportResult { saved: true, .. })),
                 "for {name}"
             );
             assert_eq!(std::fs::read(&path).expect("read back video"), content);
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn save_export_result_serializes_without_path_when_cancelled() {
+        let cancelled = serde_json::to_string(&SaveExportResult {
+            saved: false,
+            path: None,
+        })
+        .unwrap();
+        assert_eq!(cancelled, r#"{"saved":false}"#);
+        let saved = serde_json::to_string(&SaveExportResult {
+            saved: true,
+            path: Some("out.png".into()),
+        })
+        .unwrap();
+        assert_eq!(saved, r#"{"saved":true,"path":"out.png"}"#);
     }
 }

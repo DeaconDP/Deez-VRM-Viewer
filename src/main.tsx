@@ -10,11 +10,9 @@ import type { AnimationLoopMode, AnimationState, LicenceInfo, LoadState, Materia
 import { BAKE_LIMITS, type BakeStage, type BakeStats, type BakeWorkerResponse } from './bake/types';
 import { validateModelFile } from './platform/files';
 import { installDesktopBridge } from './platform/desktopBridge';
-import { EXPORT_FILTERS, saveLocalFile } from './platform/exportFile';
-import { QUATERNIUS_LIBRARIES } from './viewer/quaterniusAnimations';
+import { QUATERNIUS_LIBRARIES } from './viewer/quaterniusLibraries';
 import { virtualWindow } from './ui/virtualWindow';
 import { clearSceneSettings, DEFAULT_SCENE, loadSceneSettings, saveSceneSettings, type SceneSettings } from './ui/sceneSettingsStore';
-import { CaptureDialog } from './ui/CaptureDialog';
 import { captureFileName } from './ui/captureSizes';
 import termsUrl from '../TERMS.md?url';
 import privacyUrl from '../PRIVACY.md?url';
@@ -30,6 +28,12 @@ type Controller = import('./viewer/ViewerController').ViewerController;
 type BuiltInAnimationId = import('./viewer/ViewerController').BuiltInAnimationId;
 type CameraPreset = import('./viewer/cameraPresets').CameraPreset;
 type LegalView = 'about' | 'terms' | 'privacy' | 'licences';
+type CaptureDialogView = typeof import('./ui/CaptureDialog').CaptureDialog;
+
+// Saving and the capture dialog load on demand: they pull in the Tauri dialog plugin, which the startup chunk does not need.
+const loadExportFile = () => import('./platform/exportFile');
+let captureDialogLoad: Promise<CaptureDialogView> | null = null;
+const loadCaptureDialog = () => captureDialogLoad ??= import('./ui/CaptureDialog').then(module => module.CaptureDialog, reason => { captureDialogLoad = null; throw reason; });
 
 const LEGAL_VERSION = '2026-07-05-v2';
 const LEGAL_ACCEPTANCE_KEY = 'deez-vrm-viewer:legal-acceptance';
@@ -372,6 +376,10 @@ function App() {
   const [animationSpeed, setAnimationSpeed] = useState(1), [animationLoop, setAnimationLoop] = useState<AnimationLoopMode>('repeat'), [inPlace, setInPlace] = useState(true);
   const [legalAccepted, setLegalAccepted] = useState(hasAcceptedLegal), [legalView, setLegalView] = useState<LegalView>('about'), [legalOpen, setLegalOpen] = useState(false);
   const [viewerReady, setViewerReady] = useState(false), [fps, setFps] = useState<number | null>(null);
+  const [CaptureDialog, setCaptureDialog] = useState<CaptureDialogView | null>(null), [captureLoadError, setCaptureLoadError] = useState('');
+  // Fetch the dialog once the viewer is up (or when it is opened first) so the Screenshot button still opens it at once.
+  // A failed fetch (offline, stale deploy) is shown when the dialog is opened, and opening it again retries.
+  useEffect(() => { if (CaptureDialog || (!viewerReady && !captureOpen)) return; let live = true; if (captureOpen) setCaptureLoadError(''); loadCaptureDialog().then(view => { if (live) setCaptureDialog(() => view); }, reason => { console.error(reason); if (live) setCaptureLoadError(`The capture tools could not be loaded (${reason instanceof Error ? reason.message : String(reason)}). Check your connection and try again.`); }); return () => { live = false; }; }, [viewerReady, captureOpen, CaptureDialog]);
   const [highlight, setHighlight] = useState<{ kind: string; count: number }>({ kind: '', count: 0 });
   const [springs, setSprings] = useState({ visible: false, joints: 0, colliders: 0 });
   const isVRM = model?.format === 'VRM';
@@ -476,6 +484,7 @@ function App() {
     if (!controller.current) throw new Error('The viewer is still starting.');
     const dataUrl = controller.current.captureImage(options);
     const bytes = new Uint8Array(await (await fetch(dataUrl)).arrayBuffer());
+    const { EXPORT_FILTERS, saveLocalFile } = await loadExportFile();
     const result = await saveLocalFile({
       bytes,
       fileName: captureFileName(model?.name, options),
@@ -548,6 +557,7 @@ function App() {
           void (async () => {
             try {
               const bytes = new Uint8Array(message.buffer);
+              const { saveLocalFile } = await loadExportFile();
               const result = await saveLocalFile({
                 bytes,
                 fileName: message.fileName,
@@ -623,7 +633,7 @@ function App() {
       <input ref={backgroundInput} hidden type="file" accept="image/*" onChange={e => { const file = e.currentTarget.files?.[0]; if (file) openBackground(file); e.currentTarget.value = ''; }} />
     </header>
     <aside class="left-panel"><Explorer model={model} filter={filter} setFilter={setFilter} selected={selected} setSelected={setSelected} onFrame={frameItem} /></aside>
-    <section class="viewport" data-camera-preset={cameraPreset || undefined} data-selection-kind={highlight.kind} data-selection-count={highlight.count} data-spring-visible={isVRM && springs.visible} data-spring-joints={springs.joints} data-spring-colliders={springs.colliders}>
+    <section class="viewport" data-viewer-ready={viewerReady} data-camera-preset={cameraPreset || undefined} data-selection-kind={highlight.kind} data-selection-count={highlight.count} data-spring-visible={isVRM && springs.visible} data-spring-joints={springs.joints} data-spring-colliders={springs.colliders}>
       <canvas ref={canvasRef} aria-label={model ? `3D view of ${model.name}` : 'Empty 3D model viewport'} />
       {state === 'idle' && <EmptyState onOpen={() => fileInput.current?.click()} onUrl={() => setUrlOpen(true)} onFreebie={() => void loadFreebie()} />}
       {state === 'parsing' && <div class="loading"><div class="spinner" /><b>Opening {fileName}</b><span>{progress ? `${Math.round(progress * 100)}%` : 'Reading model…'}</span><div class="progress"><i style={{ width: `${Math.max(8, progress * 100)}%` }} /></div></div>}
@@ -639,7 +649,8 @@ function App() {
       <div class="model-summary">{model && <><span>{model.meshes} meshes</span><span>{model.triangles.toLocaleString()} tris</span><span>{formatBytes(model.size)}</span></>}<span class="fps" title="Frames per second while the viewport is animating"><Gauge /> {fps === null ? 'Idle' : `${fps} FPS`}</span></div>
     </footer>
     {urlOpen && <div class="modal-backdrop" onClick={() => setUrlOpen(false)}><form class="dialog" onSubmit={submitUrl} onClick={e => e.stopPropagation()}><div class="dialog-head"><h2>Open public URL</h2><button type="button" onClick={() => setUrlOpen(false)}><X /></button></div><p>The server must allow browser access (CORS). The model is never uploaded anywhere else.</p><input name="url" type="url" required autoFocus placeholder="https://example.com/avatar.vrm" /><div class="dialog-actions"><button type="button" class="secondary" onClick={() => setUrlOpen(false)}>Cancel</button><button class="primary">Open model</button></div></form></div>}
-    {captureOpen && <CaptureDialog controller={viewerReady ? controller.current : null} modelName={model?.name} hasModel={!!model} hasAnimation={animation.duration > 0} onSaveImage={screenshot} onClose={() => setCaptureOpen(false)} />}
+    {captureOpen && !CaptureDialog && captureLoadError && <div class="modal-backdrop" onClick={() => setCaptureOpen(false)}><div class="dialog" role="alertdialog" aria-label="Capture" onClick={e => e.stopPropagation()}><div class="dialog-head"><h2>Capture</h2><button type="button" onClick={() => setCaptureOpen(false)}><X /></button></div><p role="alert" data-capture-load-error>{captureLoadError}</p><div class="dialog-actions"><button type="button" class="secondary" onClick={() => setCaptureOpen(false)}>Close</button></div></div></div>}
+    {captureOpen && CaptureDialog && <CaptureDialog controller={viewerReady ? controller.current : null} modelName={model?.name} hasModel={!!model} hasAnimation={animation.duration > 0} onSaveImage={screenshot} onClose={() => setCaptureOpen(false)} />}
     {(!legalAccepted || legalOpen) && <LegalDialog view={legalView} setView={setLegalView} mustAccept={!legalAccepted} onAccept={acceptLegal} onClose={() => setLegalOpen(false)} />}
   </main>;
 }

@@ -41,3 +41,6 @@ pnpm-debug.log*
 
 # Test and coverage
 coverage/
+test-results/
+playwright-report/
+blob-report/

@@ -12,6 +12,8 @@
     "build:desktop": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json && vite build --mode desktop",
     "preview": "vite preview --host 127.0.0.1",
     "test": "vitest run",
+    "test:e2e": "playwright test",
+    "fixture:vrm": "node scripts/make-fixture-vrm.mjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"
@@ -28,6 +30,7 @@
     "three": "^0.180.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.65.1",
     "@preact/preset-vite": "^2.10.2",
     "@tauri-apps/cli": "^2.11.4",
     "@types/three": "^0.180.0",
