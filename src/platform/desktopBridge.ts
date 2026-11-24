@@ -27,7 +27,7 @@ export function installDesktopBridge() {
   window.desktop = { onOpenModel: models.subscribe, onOpenError: errors.subscribe };
 
   // The Tauri APIs are only fetched inside the desktop shell, so the web build's startup chunk stays free of them.
-  // Opens and errors are queued until the app subscribes, so registering the listeners a tick later loses nothing.
+  // Opens and errors are queued until the app subscribes; Rust keeps each open until the page pulls it (see wireDesktopEvents).
   void Promise.all([import('@tauri-apps/api/core'), import('@tauri-apps/api/event'), import('@tauri-apps/api/webview')])
     .then(([{ invoke }, { listen }, { getCurrentWebview }]) => wireDesktopEvents(invoke, listen, getCurrentWebview, models.deliver, fail))
     .catch(fail);
@@ -43,9 +43,12 @@ function wireDesktopEvents(invoke: TauriCore['invoke'], listen: TauriEvent['list
     deliver({ name: result.name, bytes: toBytes(result.bytes) });
   };
 
-  void listen<string>('open-model-path', event => {
-    void loadPath(event.payload).catch(fail);
-  });
+  // Rust stores each open and sends a payload-free ping; pulling the path (once the listener exists, then on every ping)
+  // means an open sent while this page was still loading is never dropped.
+  const takePending = () => invoke<string | null>('take_pending_model_path')
+    .then(path => { if (path) return loadPath(path); })
+    .catch(fail);
+  void listen('open-model-pending', () => { void takePending(); }).then(takePending, fail);
 
   void getCurrentWebview().onDragDropEvent(event => {
     if (event.payload.type !== 'drop') return;
@@ -56,8 +59,4 @@ function wireDesktopEvents(invoke: TauriCore['invoke'], listen: TauriEvent['list
     }
     void loadPath(path).catch(fail);
   }).catch(error => console.error(error));
-
-  void invoke<string | null>('take_pending_model_path')
-    .then(path => { if (path) return loadPath(path); })
-    .catch(fail);
 }

@@ -15,7 +15,8 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  # One release run at a time, so a tag push and a manual run can't both create a draft.
+  group: release
   cancel-in-progress: false
 
 jobs:
@@ -60,10 +61,14 @@ jobs:
 
           By deac online · Worldbuild.io
           NOTES
-            gh release create "${tag}" --draft --target "${GITHUB_SHA}" \
-              --title "Deez VRM Viewer ${tag}" --notes-file "${notes_file}"
-            id=$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
-              --jq ".[] | select(.tag_name == \"${tag}\" and .draft) | .id" | head -n 1)
+            # Take the id from the create call itself; listing releases straight after can be stale.
+            id=$(gh api -X POST "repos/${GITHUB_REPOSITORY}/releases" \
+              -f tag_name="${tag}" -f target_commitish="${GITHUB_SHA}" \
+              -f name="Deez VRM Viewer ${tag}" -F body=@"${notes_file}" -F draft=true --jq .id)
+          fi
+          if [ -z "${id}" ]; then
+            echo "::error::Could not create or find the draft release for ${tag}."
+            exit 1
           fi
           echo "id=${id}" >> "${GITHUB_OUTPUT}"
 

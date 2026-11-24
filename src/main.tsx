@@ -376,9 +376,10 @@ function App() {
   const [animationSpeed, setAnimationSpeed] = useState(1), [animationLoop, setAnimationLoop] = useState<AnimationLoopMode>('repeat'), [inPlace, setInPlace] = useState(true);
   const [legalAccepted, setLegalAccepted] = useState(hasAcceptedLegal), [legalView, setLegalView] = useState<LegalView>('about'), [legalOpen, setLegalOpen] = useState(false);
   const [viewerReady, setViewerReady] = useState(false), [fps, setFps] = useState<number | null>(null);
-  const [CaptureDialog, setCaptureDialog] = useState<CaptureDialogView | null>(null);
+  const [CaptureDialog, setCaptureDialog] = useState<CaptureDialogView | null>(null), [captureLoadError, setCaptureLoadError] = useState('');
   // Fetch the dialog once the viewer is up (or when it is opened first) so the Screenshot button still opens it at once.
-  useEffect(() => { if (!viewerReady && !captureOpen) return; let live = true; loadCaptureDialog().then(view => { if (live) setCaptureDialog(() => view); }, reason => console.error(reason)); return () => { live = false; }; }, [viewerReady, captureOpen]);
+  // A failed fetch (offline, stale deploy) is shown when the dialog is opened, and opening it again retries.
+  useEffect(() => { if (CaptureDialog || (!viewerReady && !captureOpen)) return; let live = true; if (captureOpen) setCaptureLoadError(''); loadCaptureDialog().then(view => { if (live) setCaptureDialog(() => view); }, reason => { console.error(reason); if (live) setCaptureLoadError(`The capture tools could not be loaded (${reason instanceof Error ? reason.message : String(reason)}). Check your connection and try again.`); }); return () => { live = false; }; }, [viewerReady, captureOpen, CaptureDialog]);
   const [highlight, setHighlight] = useState<{ kind: string; count: number }>({ kind: '', count: 0 });
   const [springs, setSprings] = useState({ visible: false, joints: 0, colliders: 0 });
   const isVRM = model?.format === 'VRM';
@@ -648,6 +649,7 @@ function App() {
       <div class="model-summary">{model && <><span>{model.meshes} meshes</span><span>{model.triangles.toLocaleString()} tris</span><span>{formatBytes(model.size)}</span></>}<span class="fps" title="Frames per second while the viewport is animating"><Gauge /> {fps === null ? 'Idle' : `${fps} FPS`}</span></div>
     </footer>
     {urlOpen && <div class="modal-backdrop" onClick={() => setUrlOpen(false)}><form class="dialog" onSubmit={submitUrl} onClick={e => e.stopPropagation()}><div class="dialog-head"><h2>Open public URL</h2><button type="button" onClick={() => setUrlOpen(false)}><X /></button></div><p>The server must allow browser access (CORS). The model is never uploaded anywhere else.</p><input name="url" type="url" required autoFocus placeholder="https://example.com/avatar.vrm" /><div class="dialog-actions"><button type="button" class="secondary" onClick={() => setUrlOpen(false)}>Cancel</button><button class="primary">Open model</button></div></form></div>}
+    {captureOpen && !CaptureDialog && captureLoadError && <div class="modal-backdrop" onClick={() => setCaptureOpen(false)}><div class="dialog" role="alertdialog" aria-label="Capture" onClick={e => e.stopPropagation()}><div class="dialog-head"><h2>Capture</h2><button type="button" onClick={() => setCaptureOpen(false)}><X /></button></div><p role="alert" data-capture-load-error>{captureLoadError}</p><div class="dialog-actions"><button type="button" class="secondary" onClick={() => setCaptureOpen(false)}>Close</button></div></div></div>}
     {captureOpen && CaptureDialog && <CaptureDialog controller={viewerReady ? controller.current : null} modelName={model?.name} hasModel={!!model} hasAnimation={animation.duration > 0} onSaveImage={screenshot} onClose={() => setCaptureOpen(false)} />}
     {(!legalAccepted || legalOpen) && <LegalDialog view={legalView} setView={setLegalView} mustAccept={!legalAccepted} onAccept={acceptLegal} onClose={() => setLegalOpen(false)} />}
   </main>;

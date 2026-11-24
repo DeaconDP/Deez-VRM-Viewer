@@ -7,7 +7,6 @@
   ],
   "permissions": [
     "core:default",
-    "opener:default",
     "allow-read-model-file",
     "allow-take-pending-model-path",
     "allow-save-export-file"

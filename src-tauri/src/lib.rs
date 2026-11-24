@@ -150,16 +150,16 @@ fn focus_main_window(app: &AppHandle) {
     }
 }
 
+/// Stores the path for the frontend to take and pings it. The ping carries no path: an event sent before the page has
+/// registered its listener is dropped, so the frontend always pulls with `take_pending_model_path` (on startup once its
+/// listener exists, then on every ping), and no open is lost while the window is still loading. The newest open wins.
 fn emit_model_path(app: &AppHandle, path: PathBuf) {
-    let _ = app.emit("open-model-path", path.to_string_lossy().to_string());
-}
-
-fn queue_or_emit_model(app: &AppHandle, pending: &PendingModel, path: PathBuf) {
-    if app.get_webview_window("main").is_some() {
-        emit_model_path(app, path);
-    } else if let Ok(mut guard) = pending.0.lock() {
-        *guard = Some(path);
+    if let Some(pending) = app.try_state::<PendingModel>() {
+        if let Ok(mut guard) = pending.0.lock() {
+            *guard = Some(path);
+        }
     }
+    let _ = app.emit("open-model-pending", ());
 }
 
 fn choose_model(app: &AppHandle) {
@@ -455,11 +455,7 @@ pub fn run() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             focus_main_window(app);
             if let Some(path) = model_path_from_args(&args) {
-                if let Some(pending) = app.try_state::<PendingModel>() {
-                    queue_or_emit_model(app, pending.inner(), path);
-                } else {
-                    emit_model_path(app, path);
-                }
+                emit_model_path(app, path);
             }
         }));
     }
@@ -492,16 +488,6 @@ pub fn run() {
                 }
             }
             _ => {}
-        })
-        .on_page_load(|window, _payload| {
-            let app = window.app_handle();
-            if let Some(pending) = app.try_state::<PendingModel>() {
-                if let Ok(mut guard) = pending.0.lock() {
-                    if let Some(path) = guard.take() {
-                        emit_model_path(app, path);
-                    }
-                }
-            }
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
