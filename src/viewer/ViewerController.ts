@@ -588,12 +588,13 @@ export class ViewerController {
         active.onstop = () => resolve();
         active.onerror = event => reject((event as Event & { error?: unknown }).error ?? new Error('The video recorder failed.'));
       });
+      stopped.catch(() => {}); // Awaited below; this only prevents an unhandled-rejection warning while frames render.
       if (source === 'animation' && this.action && this.mixer) { this.action.reset(); this.action.paused = false; this.action.play(); this.mixer.setTime(0); }
       else if (playing && this.action) this.action.paused = false;
       const wait = (until: number) => new Promise<void>(resolve => setTimeout(resolve, Math.max(0, until - performance.now())));
       recorder.start(1000);
       const started = performance.now();
-      for (let frame = 0; frame < frames && !signal?.aborted; frame++) {
+      for (let frame = 0; frame < frames && !signal?.aborted && recorder.state !== 'inactive'; frame++) {
         await wait(started + frame * delta * 1000);
         if (signal?.aborted) break;
         if (frame > 0) this.stepCaptureFrame(delta);

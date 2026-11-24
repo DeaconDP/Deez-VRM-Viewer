@@ -352,14 +352,18 @@ function App() {
   const [sceneSettings, setSceneSettings] = useState<SceneSettings>(() => loadSceneSettings()), [sceneError, setSceneError] = useState('');
   const [grid, setGridState] = useState(sceneSettings.grid), [cameraPreset, setCameraPreset] = useState<CameraPreset | ''>('');
   // Only user changes are saved: loading or resetting the scene must not write the store back.
-  const sceneDirty = useRef(false), sceneSaveTimer = useRef(0);
+  const sceneDirty = useRef(false), sceneSaveTimer = useRef(0), pendingSceneSave = useRef<(() => void) | null>(null);
   const setGrid = (visible: boolean) => { sceneDirty.current = true; setGridState(visible); };
+  const flushSceneSave = () => { clearTimeout(sceneSaveTimer.current); pendingSceneSave.current?.(); pendingSceneSave.current = null; };
   useEffect(() => {
     if (!sceneDirty.current) return;
     clearTimeout(sceneSaveTimer.current);
-    sceneSaveTimer.current = window.setTimeout(() => saveSceneSettings({ ...sceneSettings, grid }), 250);
+    const settings = { ...sceneSettings, grid };
+    pendingSceneSave.current = () => saveSceneSettings(settings);
+    sceneSaveTimer.current = window.setTimeout(flushSceneSave, 250);
   }, [sceneSettings, grid]);
-  useEffect(() => () => clearTimeout(sceneSaveTimer.current), []);
+  // Write a change made just before the window closes instead of dropping it with the debounce timer.
+  useEffect(() => { addEventListener('pagehide', flushSceneSave); return () => { removeEventListener('pagehide', flushSceneSave); flushSceneSave(); }; }, []);
   useEffect(() => setCameraPreset(''), [model]);
   const applyCameraPreset = useRef((_preset: CameraPreset) => {});
   applyCameraPreset.current = preset => { if (controller.current?.setCameraPreset(preset)) setCameraPreset(preset); };
@@ -394,8 +398,10 @@ function App() {
     setBake(showCancelled ? { ...EMPTY_BAKE, detail: 'Baking cancelled.' } : EMPTY_BAKE);
   };
 
+  /** True while a video records; opening another model then would dispose the model being recorded. */
+  const recordingBlocksLoad = () => !!controller.current?.getCaptureInfo().recording;
   const loadUrl = async (url: string, name: string, size = 0) => {
-    if (!controller.current) return;
+    if (!controller.current || recordingBlocksLoad()) return false;
     const generation = ++loadGeneration.current;
     loadInFlight.current = true;
     setState('parsing'); setProgress(0); setError(''); setSelected(null); setFileName(name); setExpressionValues({});
@@ -410,6 +416,7 @@ function App() {
     setError(message); setState('error');
   };
   const openFile = async (file: File, options?: { preserveBake?: boolean }) => {
+    if (recordingBlocksLoad()) return;
     if (!options?.preserveBake) cancelBake(false);
     setSourceFile(null);
     const validationError = await validateModelFile(file);
@@ -430,6 +437,7 @@ function App() {
     return () => { stopModels(); stopErrors(); };
   }, [viewerReady]);
   const loadFreebie = async () => {
+    if (recordingBlocksLoad()) return;
     cancelBake(false); setSourceFile(null); reloadSource.current = null;
     // Claim a load generation now: a file opened while the registry downloads must win over this freebie.
     const generation = ++loadGeneration.current;
@@ -513,7 +521,7 @@ function App() {
     try { const parsed = new URL(value); if (!['https:', 'http:'].includes(parsed.protocol)) throw new Error(); void applyBackgroundImage(parsed.href, parsed.hostname); }
     catch { setSceneError('Enter a valid HTTP or HTTPS image URL.'); }
   };
-  const resetScene = () => { sceneDirty.current = false; clearTimeout(sceneSaveTimer.current); clearSceneSettings(); setSceneSettings(DEFAULT_SCENE); setGridState(controller.current?.setGridVisible(DEFAULT_SCENE.grid) ?? DEFAULT_SCENE.grid); setSceneError(''); controller.current?.setLighting(DEFAULT_SCENE.key, DEFAULT_SCENE.fill, DEFAULT_SCENE.rim, DEFAULT_SCENE.exposure); controller.current?.setBackgroundColor(DEFAULT_SCENE.backgroundColor); };
+  const resetScene = () => { sceneDirty.current = false; clearTimeout(sceneSaveTimer.current); pendingSceneSave.current = null; clearSceneSettings(); setSceneSettings(DEFAULT_SCENE); setGridState(controller.current?.setGridVisible(DEFAULT_SCENE.grid) ?? DEFAULT_SCENE.grid); setSceneError(''); controller.current?.setLighting(DEFAULT_SCENE.key, DEFAULT_SCENE.fill, DEFAULT_SCENE.rim, DEFAULT_SCENE.exposure); controller.current?.setBackgroundColor(DEFAULT_SCENE.backgroundColor); };
   const submitUrl = (event: SubmitEvent) => { event.preventDefault(); const input = new FormData(event.currentTarget as HTMLFormElement).get('url')?.toString() ?? ''; try { const parsed = new URL(input); if (parsed.protocol !== 'https:' && parsed.hostname !== 'localhost') throw new Error(); cancelBake(false); setSourceFile(null); const name = parsed.pathname.split('/').pop() || 'Remote model'; reloadSource.current = { kind: 'url', url: parsed.href, name }; void loadUrl(parsed.href, name); setUrlOpen(false); } catch { setError('Enter a valid HTTPS model URL.'); setState('error'); } };
   const acceptLegal = () => { try { localStorage.setItem(LEGAL_ACCEPTANCE_KEY, LEGAL_VERSION); } catch { /* Acceptance remains valid for this session. */ } setLegalAccepted(true); };
   const showLegal = (view: LegalView) => { setLegalView(view); setLegalOpen(true); };
@@ -592,7 +600,7 @@ function App() {
     }
   };
 
-  useEffect(() => { const keys = (e: KeyboardEvent) => { if (e.repeat || (e.target as HTMLElement).matches('input,textarea,select,[contenteditable]')) return; if (e.key.toLowerCase() === 'g') setGrid(controller.current?.toggleGrid() ?? false); if (e.key.toLowerCase() === 'b' && !e.ctrlKey && !e.metaKey && !e.altKey) toggleSprings.current(); if (e.key === 'Home' || e.key.toLowerCase() === 'f') controller.current?.frameAll(); if (!e.ctrlKey && !e.metaKey && !e.altKey && ['1', '2', '3'].includes(e.key)) applyCameraPreset.current((['full', 'portrait', 'thumbnail'] as const)[Number(e.key) - 1]); if (e.key === 'Escape') { setUrlOpen(false); setCaptureOpen(false); setSelected(null); } }; addEventListener('keydown', keys); return () => removeEventListener('keydown', keys); }, []);
+  useEffect(() => { const keys = (e: KeyboardEvent) => { if (e.repeat || (e.target as HTMLElement).matches('input,textarea,select,[contenteditable]') || controller.current?.getCaptureInfo().recording) return; if (e.key.toLowerCase() === 'g') setGrid(controller.current?.toggleGrid() ?? false); if (e.key.toLowerCase() === 'b' && !e.ctrlKey && !e.metaKey && !e.altKey) toggleSprings.current(); if (e.key === 'Home' || e.key.toLowerCase() === 'f') { controller.current?.frameAll(); setCameraPreset(''); } if (!e.ctrlKey && !e.metaKey && !e.altKey && ['1', '2', '3'].includes(e.key)) applyCameraPreset.current((['full', 'portrait', 'thumbnail'] as const)[Number(e.key) - 1]); if (e.key === 'Escape') { setUrlOpen(false); setCaptureOpen(false); setSelected(null); } }; addEventListener('keydown', keys); return () => removeEventListener('keydown', keys); }, []);
 
   return <main class={`app ${!leftOpen ? 'left-closed' : ''} ${!rightOpen ? 'right-closed' : ''}`} onDragOver={e => e.preventDefault()} onDrop={onDrop}>
     <header class="toolbar">
@@ -602,7 +610,7 @@ function App() {
         <IconButton label="Open public URL" onClick={() => setUrlOpen(true)} hideMobile><Upload /></IconButton>
         <IconButton label="Reload model" onClick={reload} disabled={!reloadSource.current || state === 'parsing'} hideMobile><RefreshCw /></IconButton>
         <span class="toolbar-divider" />
-        <IconButton label="Frame model" onClick={() => controller.current?.frameAll()}><Maximize /></IconButton>
+        <IconButton label="Frame model" onClick={() => { controller.current?.frameAll(); setCameraPreset(''); }}><Maximize /></IconButton>
         {(['front', 'back', 'left', 'right'] as const).map(view => <button class="view-button hide-mobile" onClick={() => { controller.current?.setView(view); setCameraPreset(''); }} title={`${view} view`}>{view[0].toUpperCase()}</button>)}
         <IconButton label="Turntable" active={turntable} onClick={() => setTurntable(controller.current?.toggleTurntable() ?? false)} hideMobile>{turntable ? <Square /> : <Play />}</IconButton>
         <IconButton label="Grid" active={grid} onClick={() => setGrid(controller.current?.toggleGrid() ?? false)} hideMobile><Grid3X3 /></IconButton>
