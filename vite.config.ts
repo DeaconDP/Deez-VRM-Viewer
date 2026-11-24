@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from 'vite';
 import preact from '@preact/preset-vite';
 import { VitePWA } from 'vite-plugin-pwa';
@@ -19,6 +20,10 @@ export default defineConfig(({ mode }) => ({
     host: '127.0.0.1',
     port: STICKY_PORT,
     strictPort: true
+  },
+  test: {
+    // Unit tests only; the Playwright smoke tests in e2e/ run through `npm run test:e2e`.
+    include: ['src/**/*.test.{ts,tsx}']
   },
   build: {
     rollupOptions: {

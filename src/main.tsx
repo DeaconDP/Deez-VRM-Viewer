@@ -632,7 +632,7 @@ function App() {
       <input ref={backgroundInput} hidden type="file" accept="image/*" onChange={e => { const file = e.currentTarget.files?.[0]; if (file) openBackground(file); e.currentTarget.value = ''; }} />
     </header>
     <aside class="left-panel"><Explorer model={model} filter={filter} setFilter={setFilter} selected={selected} setSelected={setSelected} onFrame={frameItem} /></aside>
-    <section class="viewport" data-camera-preset={cameraPreset || undefined} data-selection-kind={highlight.kind} data-selection-count={highlight.count} data-spring-visible={isVRM && springs.visible} data-spring-joints={springs.joints} data-spring-colliders={springs.colliders}>
+    <section class="viewport" data-viewer-ready={viewerReady} data-camera-preset={cameraPreset || undefined} data-selection-kind={highlight.kind} data-selection-count={highlight.count} data-spring-visible={isVRM && springs.visible} data-spring-joints={springs.joints} data-spring-colliders={springs.colliders}>
       <canvas ref={canvasRef} aria-label={model ? `3D view of ${model.name}` : 'Empty 3D model viewport'} />
       {state === 'idle' && <EmptyState onOpen={() => fileInput.current?.click()} onUrl={() => setUrlOpen(true)} onFreebie={() => void loadFreebie()} />}
       {state === 'parsing' && <div class="loading"><div class="spinner" /><b>Opening {fileName}</b><span>{progress ? `${Math.round(progress * 100)}%` : 'Reading model…'}</span><div class="progress"><i style={{ width: `${Math.max(8, progress * 100)}%` }} /></div></div>}
