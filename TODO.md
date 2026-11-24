@@ -2,6 +2,13 @@
 
 Current epic: **E4 · Release and trust** (see [ROADMAP.md](ROADMAP.md)). E1–E3 are done, awaiting merge in PRs #7–#10.
 
+## E4 · Release and trust
+
+- [x] Exports go only where the user chose: the `save_export_file` command opens the native Save dialog in Rust and writes only to the path it returns (still .vrm / .png / .webm / .mp4, never empty); `write_export_file` and the frontend `dialog:` permissions are removed; Rust unit tests cover cancel, a dialog path with the wrong extension, empty bytes and nested folders
+- [x] Content Security Policy for the Tauri shell (`script-src 'self'`, no inline styles, `https:` only for user-entered models and backgrounds, plus `http://localhost` models); each source is explained in [docs/SECURITY.md](docs/SECURITY.md); checked with zero violations in Chromium and in the real WebView2 window
+- [x] Release workflow (`.github/workflows/release.yml`): a `v*` tag or manual run builds the Windows NSIS installer and a universal macOS `.dmg` into a draft GitHub release; Windows (PFX) and macOS (Developer ID + notarisation) signing run only when their secrets are set ([docs/RELEASING.md](docs/RELEASING.md))
+- [ ] Follow-up: buy certificates, add the signing secrets and cut the first signed release (the workflow has not run yet)
+
 ## E3 · Look dev and capture (done, awaiting merge in PR #10)
 
 - [x] Persist scene settings between sessions (local only): lighting, exposure, background colour and grid are saved in this browser (`deez-vrm-viewer:scene:v1`); background images are never stored; "Reset scene" clears the saved value
