@@ -31,14 +31,14 @@ Every visible control must do what it says, and every failure must reach the use
 - VRM licence fields shown in full (allowed users, commercial use, redistribution)
 - Explorer lists beyond 250 items per group (virtualised list)
 
-## E3 · Look dev and capture (Next)
+## E3 · Look dev and capture (PR #10)
 
 - Persist scene settings between sessions (local only)
 - Camera presets: portrait, full body, VRChat-style thumbnail framing
 - Transparent capture at custom resolutions
-- Short turntable or animation capture to WebM/GIF
+- Short turntable or animation capture to WebM (GIF deferred)
 
-## E4 · Release and trust
+## E4 · Release and trust (Next)
 
 - Signed Windows installer and notarised macOS build from CI
 - Content Security Policy for the Tauri shell (`security.csp` is currently `null`)
@@ -51,3 +51,5 @@ Every visible control must do what it says, and every failure must reach the use
 - FBX / BVH motion import (convert to VRMA externally for now)
 - Editing and re-exporting VRM metadata
 - Multi-model scenes
+- GIF export (needs an encoder dependency; WebM covers short clips for now)
+- Frame-exact video export through WebCodecs

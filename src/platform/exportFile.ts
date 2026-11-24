@@ -3,6 +3,14 @@ import { save } from '@tauri-apps/plugin-dialog';
 
 export type SaveFilter = { name: string; extensions: string[] };
 
+/** Save dialog filters for every export type `write_export_file` accepts on desktop. */
+export const EXPORT_FILTERS: Record<'vrm' | 'png' | 'webm' | 'mp4', SaveFilter> = {
+  vrm: { name: 'VRM', extensions: ['vrm'] },
+  png: { name: 'PNG image', extensions: ['png'] },
+  webm: { name: 'WebM video', extensions: ['webm'] },
+  mp4: { name: 'MP4 video', extensions: ['mp4'] }
+};
+
 export type SaveLocalFileResult =
   | { saved: true; path?: string }
   | { saved: false };

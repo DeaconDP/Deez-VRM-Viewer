@@ -12,6 +12,9 @@ import { describeMaterialInfo, listTextureSlots } from './materialInfo';
 import { textureThumbnail } from './textureThumbnail';
 import { SpringBoneOverlay, countSpringBones } from './springBoneOverlay';
 import { retargetQuaterniusClip, type QuaterniusAnimationId, type QuaterniusLibraryId } from './quaterniusAnimations';
+import { FRAMING_BONES, frameCameraPreset, type CameraPreset, type FramingBone } from './cameraPresets';
+import { captureLimits, validateCaptureSize } from '../ui/captureSizes';
+import { videoBitrate } from '../ui/videoFormat';
 
 export type BuiltInAnimationId = QuaterniusAnimationId;
 
@@ -280,6 +283,22 @@ export class ViewerController {
     const vectors = { front: [0, 0, distance], back: [0, 0, -distance], left: [-distance, 0, 0], right: [distance, 0, 0] } as const;
     this.camera.position.set(target.x + vectors[view][0], target.y, target.z + vectors[view][2]); this.controls.update(); this.render();
   }
+  /**
+   * Frames the model for a preset from in front of it (VRM and glTF face +Z, the same side as setView('front')),
+   * following the current turntable rotation. Uses humanoid bones for VRM, the bounding box otherwise. Returns false without a model.
+   */
+  setCameraPreset(preset: CameraPreset) {
+    if (!this.model) return false;
+    this.model.updateWorldMatrix(true, true);
+    const facing = new THREE.Vector3(0, 0, 1).applyQuaternion(this.model.getWorldQuaternion(new THREE.Quaternion()));
+    const bones: Partial<Record<FramingBone, THREE.Vector3>> = {};
+    if (this.vrm) for (const name of FRAMING_BONES) { const node = this.vrm.humanoid.getNormalizedBoneNode(name); if (node) bones[name] = node.getWorldPosition(new THREE.Vector3()); }
+    const framing = frameCameraPreset(preset, { bounds: new THREE.Box3().setFromObject(this.model), facing, bones: this.vrm ? bones : undefined }, this.camera.fov, this.camera.aspect);
+    if (!framing) return false;
+    this.controls.target.copy(framing.target); this.camera.position.copy(framing.position); this.controls.update(); this.render();
+    return true;
+  }
+  setGridVisible(visible: boolean) { this.grid.visible = visible; this.render(); return visible; }
   toggleGrid() { this.grid.visible = !this.grid.visible; this.render(); return this.grid.visible; }
   toggleTurntable() { this.turntable = !this.turntable; this.turntable ? this.startLoop() : this.stopLoop(); return this.turntable; }
 
@@ -488,16 +507,128 @@ export class ViewerController {
     this.render();
     return this.getSpringBoneCounts();
   }
-  capture(transparent = false, scale = 1) {
-    const old = this.scene.background, size = this.renderer.getSize(new THREE.Vector2()), ratio = this.renderer.getPixelRatio();
+  private recording = false;
+  /** Viewport (CSS pixels + pixel ratio) and the largest drawing buffer this GPU accepts, for the capture dialog. */
+  getCaptureInfo() {
+    const gl = this.renderer.getContext(), size = this.renderer.getSize(new THREE.Vector2());
+    const limits = captureLimits({ maxTextureSize: this.renderer.capabilities.maxTextureSize, maxRenderbufferSize: gl.getParameter(gl.MAX_RENDERBUFFER_SIZE), maxViewportDims: gl.getParameter(gl.MAX_VIEWPORT_DIMS) ?? [] });
+    return { viewport: { width: size.x, height: size.y, pixelRatio: this.renderer.getPixelRatio() }, limits, recording: this.recording };
+  }
+  /**
+   * Resizes the canvas drawing buffer (not its CSS box) to exactly width×height at pixel ratio 1, matches the camera aspect,
+   * and hides the selection and spring helpers. The on-screen pipeline (tone mapping, sRGB output, MSAA, premultiplied alpha)
+   * is reused unchanged, so captures match the viewport. Returns the function that restores everything.
+   */
+  private beginCapture(width: number, height: number, transparent: boolean) {
+    const { limits } = this.getCaptureInfo(), error = validateCaptureSize(width, height, limits);
+    if (error) throw new Error(error);
+    const background = this.scene.background, size = this.renderer.getSize(new THREE.Vector2()), ratio = this.renderer.getPixelRatio(), aspect = this.camera.aspect;
+    const restore = () => {
+      this.scene.background = background; this.highlight.group.visible = true; this.springs.group.visible = this.springsVisible;
+      this.renderer.setPixelRatio(ratio); this.renderer.setSize(size.x, size.y, false);
+      this.camera.aspect = aspect; this.camera.updateProjectionMatrix(); this.render();
+    };
     if (transparent) this.scene.background = null;
     this.highlight.group.visible = false; this.springs.group.visible = false;
-    try {
-      this.renderer.setPixelRatio(ratio * scale); this.renderer.setSize(size.x, size.y, false); this.render();
-      return this.canvas.toDataURL('image/png');
-    } finally {
-      this.scene.background = old; this.highlight.group.visible = true; this.springs.group.visible = this.springsVisible; this.renderer.setPixelRatio(ratio); this.renderer.setSize(size.x, size.y, false); this.render();
+    this.renderer.setPixelRatio(1); this.renderer.setSize(width, height, false);
+    this.camera.aspect = width / height; this.camera.updateProjectionMatrix();
+    const gl = this.renderer.getContext();
+    if (gl.drawingBufferWidth !== width || gl.drawingBufferHeight !== height) {
+      const got = `${gl.drawingBufferWidth}×${gl.drawingBufferHeight}`;
+      restore();
+      throw new Error(`This device could only allocate ${got} for a ${width}×${height} capture. Choose a smaller size.`);
     }
+    return restore;
+  }
+  /** Renders one PNG (data URL) at exactly width×height with the current camera framing; transparent drops the background. */
+  captureImage({ width, height, transparent }: { width: number; height: number; transparent: boolean }) {
+    if (this.recording) throw new Error('Wait for the video recording to finish.');
+    const restore = this.beginCapture(width, height, transparent);
+    try { this.render(); return this.canvas.toDataURL('image/png'); }
+    finally { restore(); }
+  }
+  /** Advances animation, spring bones and duplicate skeletons by a fixed timestep (mirrors the live loop). */
+  private stepCaptureFrame(delta: number) {
+    if (this.mixer && this.action && !this.action.paused) this.mixer.update(delta * this.speed);
+    if (this.vrm && this.duplicateBoneSync) { this.vrm.humanoid.update(); this.duplicateBoneSync.update(); }
+    this.vrm?.update(delta);
+  }
+  /**
+   * Records a WebM/MP4 of exactly `duration` seconds. Frames are rendered at a fixed timestep (1/fps) and pushed with
+   * requestFrame(), paced to wall-clock time so MediaRecorder timestamps line up. The turntable makes exactly one revolution;
+   * 'animation' plays the loaded clip from its start. The live loop, orbit controls and resize observer are paused meanwhile,
+   * and model rotation, turntable, animation time / play state, canvas size and helpers are restored afterwards.
+   * Resolves null when cancelled through `signal`.
+   */
+  async recordVideo(options: { width: number; height: number; transparent: boolean; duration: number; source: 'turntable' | 'animation'; mimeType: string; fps?: number; signal?: AbortSignal; onProgress?: (elapsed: number) => void }): Promise<Blob | null> {
+    const { width, height, transparent, duration, source, mimeType, signal, onProgress } = options, fps = options.fps ?? 30;
+    if (typeof MediaRecorder === 'undefined' || typeof this.canvas.captureStream !== 'function') throw new Error('Video recording is not supported here (MediaRecorder or canvas.captureStream is missing).');
+    if (this.recording) throw new Error('A recording is already running.');
+    if (!this.model) throw new Error('Open a model before recording.');
+    if (source === 'animation' && !(this.action && this.mixer)) throw new Error('Choose or import an animation first.');
+    const frames = Math.max(1, Math.round(duration * fps)), delta = 1 / fps, model = this.model;
+    const turntable = this.turntable, playing = this.animationState.playing, time = this.animationState.time, rotation = model.rotation.y, controls = this.controls.enabled;
+    const touchesAnimation = source === 'animation' || playing;
+    this.recording = true;
+    this.turntable = false;
+    if (playing) { if (this.action) this.action.paused = true; this.emitAnimation({ playing: false }); }
+    this.stopLoop();
+    this.controls.enabled = false;
+    this.resizeObserver.disconnect();
+    let restore: (() => void) | null = null, stream: MediaStream | null = null, recorder: MediaRecorder | null = null;
+    try {
+      restore = this.beginCapture(width, height, transparent);
+      stream = this.canvas.captureStream(0);
+      let track = stream.getVideoTracks()[0] as CanvasCaptureMediaStreamTrack | undefined;
+      if (typeof track?.requestFrame !== 'function') { stream.getTracks().forEach(t => t.stop()); stream = this.canvas.captureStream(fps); track = undefined; }
+      recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: videoBitrate(width, height, fps) });
+      const chunks: Blob[] = [], active = recorder;
+      recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
+      const stopped = new Promise<void>((resolve, reject) => {
+        active.onstop = () => resolve();
+        active.onerror = event => reject((event as Event & { error?: unknown }).error ?? new Error('The video recorder failed.'));
+      });
+      stopped.catch(() => {}); // Awaited below; this only prevents an unhandled-rejection warning while frames render.
+      if (source === 'animation' && this.action && this.mixer) { this.action.reset(); this.action.paused = false; this.action.play(); this.mixer.setTime(0); }
+      else if (playing && this.action) this.action.paused = false;
+      const wait = (until: number) => new Promise<void>(resolve => setTimeout(resolve, Math.max(0, until - performance.now())));
+      recorder.start(1000);
+      const started = performance.now();
+      for (let frame = 0; frame < frames && !signal?.aborted && recorder.state !== 'inactive'; frame++) {
+        await wait(started + frame * delta * 1000);
+        if (signal?.aborted) break;
+        if (frame > 0) this.stepCaptureFrame(delta);
+        if (source === 'turntable') model.rotation.y = rotation + Math.PI * 2 * frame / frames;
+        this.render();
+        track?.requestFrame();
+        onProgress?.(frame * delta);
+      }
+      if (!signal?.aborted) await wait(started + frames * delta * 1000);
+      onProgress?.(signal?.aborted ? 0 : duration);
+      if (recorder.state !== 'inactive') recorder.stop();
+      await stopped;
+      if (signal?.aborted) return null;
+      if (!chunks.length) throw new Error('The recorder produced no video data.');
+      return new Blob(chunks, { type: recorder.mimeType || mimeType });
+    } finally {
+      if (recorder && recorder.state !== 'inactive') try { recorder.stop(); } catch { /* Already stopping. */ }
+      stream?.getTracks().forEach(t => t.stop());
+      model.rotation.y = rotation;
+      if (touchesAnimation && this.action) this.seekAnimation(time);
+      restore?.();
+      this.controls.enabled = controls;
+      this.recording = false;
+      this.resizeObserver.observe(this.canvas.parentElement!);
+      this.turntable = turntable;
+      if (playing && this.action) this.playAnimation();
+      else if (turntable) this.startLoop();
+      else this.render();
+    }
+  }
+  /** Legacy wrapper: the current drawing buffer size times `scale`. */
+  capture(transparent = false, scale = 1) {
+    const size = this.renderer.getSize(new THREE.Vector2()), ratio = this.renderer.getPixelRatio();
+    return this.captureImage({ width: Math.round(size.x * ratio * scale), height: Math.round(size.y * ratio * scale), transparent });
   }
   dispose() { this.unload(); this.highlight.dispose(); this.springs.dispose(); this.backgroundRequest++; this.backgroundTexture?.dispose(); this.resizeObserver.disconnect(); this.controls.dispose(); this.renderer.dispose(); cancelAnimationFrame(this.raf); }
 }

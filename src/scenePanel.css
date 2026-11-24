@@ -1,0 +1,2 @@
+.camera-presets button:disabled{opacity:.42;cursor:not-allowed}.camera-presets button:disabled:hover{border-color:var(--border);background:var(--surface-2)}.camera-presets kbd{min-width:20px;height:20px;display:grid;place-items:center;border:1px solid var(--border);border-radius:4px;background:var(--surface-0);color:var(--text-3);font:600 10px 'JetBrains Mono'}.camera-presets button.selected kbd{border-color:#8a5e3b;color:var(--accent-2)}
+.scene-reset .process-note{margin-top:10px}
