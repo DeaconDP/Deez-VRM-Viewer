@@ -7,10 +7,9 @@
   ],
   "permissions": [
     "core:default",
-    "dialog:default",
     "opener:default",
     "allow-read-model-file",
     "allow-take-pending-model-path",
-    "allow-write-export-file"
+    "allow-save-export-file"
   ]
 }
