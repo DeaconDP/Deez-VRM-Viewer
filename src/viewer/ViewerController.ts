@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils, type VRM } from '@pixiv/three-vrm';
-import { createVRMAnimationClip, VRMAnimationLoaderPlugin, type VRMAnimation } from '@pixiv/three-vrm-animation';
+import type { VRMAnimation } from '@pixiv/three-vrm-animation';
 import type { AnimationLoopMode, AnimationState, MaterialDetails, ModelSummary } from '../types';
 import { DuplicateBoneSync } from './duplicateBoneSync';
 import { createFpsMeter } from './fpsMeter';
@@ -348,6 +348,8 @@ export class ViewerController {
     if (!this.vrm || !this.mixer) throw new Error('VRMA retargeting requires an open VRM humanoid.');
     this.emitAnimation({ loading: true, error: '' });
     try {
+      // VRMA support is loaded on first use; most sessions never import a .vrma file.
+      const { createVRMAnimationClip, VRMAnimationLoaderPlugin } = await import('@pixiv/three-vrm-animation');
       const loader = new GLTFLoader();
       loader.register(parser => new VRMAnimationLoaderPlugin(parser));
       const gltf = await loader.loadAsync(url);

@@ -20,6 +20,20 @@ export default defineConfig(({ mode }) => ({
     port: STICKY_PORT,
     strictPort: true
   },
+  build: {
+    rollupOptions: {
+      output: {
+        // Vendor code changes far less often than the app, so keep it in its own long-cached chunks.
+        // three-vrm-animation is left out on purpose: it is imported on demand when a .vrma is opened.
+        // three is split in two (scene graph/maths core vs WebGL renderer + loaders) to keep each chunk under 500 kB.
+        manualChunks(id) {
+          if (/[\\/]node_modules[\\/]three[\\/]build[\\/]three\.core\.js$/.test(id)) return 'three-core';
+          if (/[\\/]node_modules[\\/]three[\\/]/.test(id)) return 'three';
+          if (/[\\/]node_modules[\\/]@pixiv[\\/]three-vrm(-core|-materials-[a-z0-9-]+|-node-constraint|-springbone)?[\\/]/.test(id)) return 'three-vrm';
+        }
+      }
+    }
+  },
   plugins: [
     preact(),
     ...(mode === 'desktop' ? [] : [VitePWA({
